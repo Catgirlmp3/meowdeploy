@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MeowDeploy local agent. Safe simulation mode is enabled with --dry-run."""
 from __future__ import annotations
-import argparse, datetime as dt, hashlib, hmac, json, os, re, subprocess, time
+import argparse, datetime as dt, glob, hashlib, hmac, json, os, re, subprocess, time
 import requests
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -78,9 +78,20 @@ class Agent:
         elif name in {"start_miner", "stop_miner", "restart_miner"}:
             action = name.removesuffix("_miner")
             if not self.dry_run: subprocess.run(["systemctl", action, "meowkit.service"], check=True)
-        elif name == "get_status": return {"version": VERSION, "effective_percent": self.effective_percent(), "state": self.state}
+        elif name == "get_status": return {"version": VERSION, "effective_percent": self.effective_percent(), "state": self.state, "metrics": self.metrics()}
         else: raise ValueError("unsupported command")
         self.save(); self.apply(); return {"ok": True, "effective_percent": self.effective_percent()}
+
+    def metrics(self):
+        result = {"uptime_seconds": None, "cpu_utilization_percent": None, "temperature_c": None, "hashrate": None}
+        try: result["uptime_seconds"] = float(Path("/proc/uptime").read_text().split()[0])
+        except (OSError, ValueError, IndexError): pass
+        try: result["load_1m"] = float(Path("/proc/loadavg").read_text().split()[0])
+        except (OSError, ValueError, IndexError): pass
+        for path in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
+            try: result["temperature_c"] = round(float(Path(path).read_text().strip()) / 1000, 1); break
+            except (OSError, ValueError): pass
+        return result
 
 def signed_request(url, token, body, socks_port=9050):
     raw = json.dumps(body, separators=(",", ":")).encode(); signature = hmac.new(token.encode(), raw, hashlib.sha256).hexdigest()
