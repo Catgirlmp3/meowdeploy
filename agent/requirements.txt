@@ -1,0 +1,3 @@
+# Linux usually provides the IANA database; install tzdata for portable tests.
+tzdata>=2024.1
+requests[socks]>=2.32.0

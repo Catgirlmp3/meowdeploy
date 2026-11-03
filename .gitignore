@@ -1,0 +1,6 @@
+bin/
+obj/
+.vs/
+__pycache__/
+*.pyc
+deployment/servers.txt

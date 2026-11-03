@@ -1,0 +1,19 @@
+[Unit]
+Description=MeowDeploy Fleet Agent
+After=network-online.target tor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/meowdeploy/meowdeploy_agent.py
+Restart=always
+RestartSec=15
+User=root
+NoNewPrivileges=false
+ProtectSystem=full
+ReadWritePaths=/var/lib/meowdeploy /etc/systemd/system/meowkit.service.d
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
