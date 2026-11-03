@@ -44,6 +44,7 @@ def scheduled_percent(schedule: dict, when: dt.datetime) -> float:
 class Agent:
     def __init__(self, state_path=DEFAULT_STATE, dry_run=False):
         self.path, self.dry_run = Path(state_path), dry_run
+        self.started_monotonic = time.monotonic()
         self.state = {"version": 1, "schedule": None, "override": None, "last_applied": None}
         if self.path.exists(): self.state.update(json.loads(self.path.read_text()))
     def save(self):
@@ -78,7 +79,9 @@ class Agent:
         elif name in {"start_miner", "stop_miner", "restart_miner"}:
             action = name.removesuffix("_miner")
             if not self.dry_run: subprocess.run(["systemctl", action, "meowkit.service"], check=True)
-        elif name == "get_status": return {"version": VERSION, "effective_percent": self.effective_percent(), "state": self.state, "metrics": self.metrics()}
+        elif name == "get_status":
+            ready = time.monotonic() - self.started_monotonic >= 120
+            return {"version": VERSION, "effective_percent": self.effective_percent(), "state": self.state, "metrics_ready": ready, "metrics": self.metrics() if ready else None}
         else: raise ValueError("unsupported command")
         self.save(); self.apply(); return {"ok": True, "effective_percent": self.effective_percent()}
 
@@ -88,9 +91,25 @@ class Agent:
         except (OSError, ValueError, IndexError): pass
         try: result["load_1m"] = float(Path("/proc/loadavg").read_text().split()[0])
         except (OSError, ValueError, IndexError): pass
+        try:
+            stat = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+            total = sum(map(int, stat)); idle = int(stat[3]) + (int(stat[4]) if len(stat) > 4 else 0)
+            previous = self.state.get("cpu_sample")
+            self.state["cpu_sample"] = {"total": total, "idle": idle}
+            if previous and total > previous["total"]:
+                result["cpu_utilization_percent"] = round(100 * (1 - (idle - previous["idle"]) / (total - previous["total"])), 1)
+            self.save()
+        except (OSError, ValueError, IndexError, TypeError, KeyError): pass
         for path in glob.glob("/sys/class/thermal/thermal_zone*/temp"):
             try: result["temperature_c"] = round(float(Path(path).read_text().strip()) / 1000, 1); break
             except (OSError, ValueError): pass
+        # XMRig HTTP API must be enabled in the miner config with restricted localhost access.
+        try:
+            response = requests.get("http://127.0.0.1:18088/2/summary", timeout=1)
+            response.raise_for_status(); data = response.json()
+            hr = data.get("hashrate", {}).get("total", [])
+            if hr: result["hashrate"] = round(float(hr[0]), 2)
+        except (requests.RequestException, ValueError, TypeError, KeyError): pass
         return result
 
 def signed_request(url, token, body, socks_port=9050):
