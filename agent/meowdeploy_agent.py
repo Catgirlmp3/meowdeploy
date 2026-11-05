@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 VERSION = "0.1.0"
 DEFAULT_STATE = "/var/lib/meowdeploy/state.json"
-DROPIN = "/etc/systemd/system/meowkit.service.d/90-meowdeploy.conf"
+MINER_SERVICE = "meowdeploy-miner.service"
 
 def quota(percent: float, cores: int = 20) -> int:
     if not 0 <= percent <= 100: raise ValueError("percent must be between 0 and 100")
@@ -63,9 +63,9 @@ class Agent:
         percent = self.effective_percent() if percent is None else float(percent)
         content = f"[Service]\nCPUQuota={quota(percent)}%\nCPUAccounting=true\n"
         if not self.dry_run:
-            p = Path(DROPIN); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(content)
+            p = Path("/etc/systemd/system") / f"{MINER_SERVICE}.d" / "90-meowdeploy.conf"; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(content)
             subprocess.run(["systemctl", "daemon-reload"], check=True)
-            subprocess.run(["systemctl", "restart", "meowkit.service"], check=True)
+            subprocess.run(["systemctl", "restart", MINER_SERVICE], check=True)
         self.state["last_applied"] = {"percent": percent, "at": dt.datetime.now(dt.timezone.utc).isoformat()}; self.save()
         return percent
     def command(self, name, payload):
@@ -78,7 +78,7 @@ class Agent:
         elif name == "apply_now": pass
         elif name in {"start_miner", "stop_miner", "restart_miner"}:
             action = name.removesuffix("_miner")
-            if not self.dry_run: subprocess.run(["systemctl", action, "meowkit.service"], check=True)
+            if not self.dry_run: subprocess.run(["systemctl", action, MINER_SERVICE], check=True)
         elif name == "get_status":
             ready = time.monotonic() - self.started_monotonic >= 120
             return {"version": VERSION, "effective_percent": self.effective_percent(), "state": self.state, "metrics_ready": ready, "metrics": self.metrics() if ready else None}
@@ -121,6 +121,14 @@ def signed_request(url, token, body, socks_port=9050):
 def poll(agent, controller, agent_id, token, interval, socks_port):
     """Outbound-only polling loop. A Tor onion URL may be supplied as controller."""
     while True:
+        # Execute schedules/override expiry locally even while the controller is offline.
+        try:
+            target = agent.effective_percent()
+            previous = agent.state.get("last_applied", {}).get("percent")
+            if agent.state.get("schedule") is not None and target != previous:
+                agent.apply(target)
+        except Exception:
+            pass
         try:
             result = signed_request(controller.rstrip('/') + '/api/poll', token, {"agent_id":agent_id, "status":agent.command("get_status", {})}, socks_port)
             for command in result.get("commands", []):

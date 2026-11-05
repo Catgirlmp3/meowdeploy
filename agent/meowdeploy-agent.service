@@ -11,7 +11,7 @@ RestartSec=15
 User=root
 NoNewPrivileges=false
 ProtectSystem=full
-ReadWritePaths=/var/lib/meowdeploy /etc/systemd/system/meowkit.service.d
+ReadWritePaths=/var/lib/meowdeploy /etc/systemd/system/meowdeploy-miner.service.d /etc/systemd/system/meowdeploy-agent.service.d
 StandardOutput=journal
 StandardError=journal
 
