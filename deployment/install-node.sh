@@ -58,11 +58,17 @@ cat > "$CONF/miner.json.tmp" <<EOF
 EOF
 jq -e '.pools[0].url and .pools[0].user and .http.enabled and .http.host=="127.0.0.1"' "$CONF/miner.json.tmp" >/dev/null
 chmod 600 "$CONF/miner.json.tmp"; mv "$CONF/miner.json.tmp" "$CONF/miner.json"
-cat > "$CONF/hugepages" <<EOF
+cat > "$CONF/hugepages" <<'EOF'
 #!/bin/sh
 set -eu
 hp=/sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
-if [ -w "$hp" ]; then avail=$(awk '/MemAvailable:/ {print int(\$2/1024)}' /proc/meminfo); pages=$(( (avail-1024)/2 )); [ "$pages" -lt 0 ] && pages=0; [ "$pages" -gt 1600 ] && pages=1600; echo "$pages" > "$hp" 2>/dev/null || true; fi
+if [ -w "$hp" ]; then
+  avail=$(awk '/MemAvailable:/ {print int($2/1024)}' /proc/meminfo)
+  pages=$(((avail-1024)/2))
+  [ "$pages" -lt 0 ] && pages=0
+  [ "$pages" -gt 1600 ] && pages=1600
+  echo "$pages" > "$hp" 2>/dev/null || true
+fi
 EOF
 chmod 755 "$CONF/hugepages"
 # MSR is an optimization only; do not fail or weaken other kernel protections.
