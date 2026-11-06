@@ -17,6 +17,36 @@ than the publishing branch. Re-run the one-line command and check that the boots
 reports `MeowDeploy bootstrap 2026.11.06.2` (or newer). The bootstrap refuses to run a
 downloaded installer that does not report a version.
 
+### Long onion URLs and terminal line-wrapping
+
+A `.onion` hostname is long (56 characters). When you type or paste the full
+`--controller http://<onion>:18765` argument directly into a terminal, the line can
+wrap mid-argument and the shell may mangle it — for example `18765` can become
+`187765`. The agent then rejects the port as invalid (`InvalidURL: Failed to parse`),
+and the check-in never happens.
+
+**Recommended fix:** Set the controller URL (and token) as environment variables so the
+shell expands them cleanly, with no risk of line-wrapping corruption:
+
+```bash
+export MEOWDEPLOY_CONTROLLER="http://<onion>.onion:18765"
+export MEOWDEPLOY_TOKEN="your-shared-token"
+export MEOWDEPLOY_AGENT_ID="ubuntu"
+
+echo "$MEOWDEPLOY_CONTROLLER"   # verify the URL is intact before running
+
+curl -fsSL 'https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp/deployment/install-agent.sh' \
+  | bash -s -- \
+  --controller "$MEOWDEPLOY_CONTROLLER" \
+  --agent-id "$MEOWDEPLOY_AGENT_ID" \
+  --token "$MEOWDEPLOY_TOKEN" \
+  --agent-only --yes
+```
+
+Always verify with `echo "$MEOWDEPLOY_CONTROLLER"` before running, and confirm the port
+is `18765` (not `187765`). The installer validates the port up front and exits with a
+clear error if it is out of range.
+
 ## 2. Service state and configuration
 
 ```bash

@@ -18,12 +18,24 @@ python -m py_compile agent\meowdeploy_agent.py deployment\deploy.py
 Run as root on Debian/Ubuntu x86_64. The installer asks for confirmation unless you
 pass `--yes`.
 
+Because the `.onion` hostname is long, typing the full `--controller` URL directly in a
+terminal can cause line-wrapping that mangles the port (for example `18765` becomes
+`187765`). Use environment variables so the shell expands them cleanly:
+
 ```bash
+export MEOWDEPLOY_CONTROLLER="http://YOUR_CONTROLLER_ONION.onion:18765"
+export MEOWDEPLOY_TOKEN='replace-with-a-long-random-token'
+export MEOWDEPLOY_AGENT_ID="$(hostname -s)"
+echo "$MEOWDEPLOY_CONTROLLER"   # verify the URL is intact before running
+
 curl -fsSL https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp/deployment/install-agent.sh | bash -s -- \
-  --controller http://YOUR_CONTROLLER_ONION.onion:18765 \
-  --token 'replace-with-a-long-random-token' \
+  --controller "$MEOWDEPLOY_CONTROLLER" \
+  --token "$MEOWDEPLOY_TOKEN" \
   --cpu-percent 30
 ```
+
+The installer validates the port up front and exits with a clear error if it is out of
+range (for example `187765`).
 
 The script installs Tor, a Python venv, the agent, and XMRig. It verifies the XMRig
 release digest, writes root-only config files, validates the systemd units, starts the
