@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """MeowDeploy local agent. Safe simulation mode is enabled with --dry-run."""
 from __future__ import annotations
-import argparse, datetime as dt, glob, hashlib, hmac, json, os, re, subprocess, time
+import argparse, datetime as dt, glob, hashlib, hmac, json, logging, os, re, subprocess, time
 import requests
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 VERSION = "0.1.0"
 DEFAULT_STATE = "/var/lib/meowdeploy/state.json"
 MINER_SERVICE = "meowdeploy-miner.service"
+log = logging.getLogger("meowdeploy-agent")
 
 def quota(percent: float, cores: int = 20) -> int:
     if not 0 <= percent <= 100: raise ValueError("percent must be between 0 and 100")
@@ -128,18 +129,37 @@ def poll(agent, controller, agent_id, token, interval, socks_port):
             if agent.state.get("schedule") is not None and target != previous:
                 agent.apply(target)
         except Exception:
-            pass
+            log.exception("local schedule/override apply failed")
         try:
             result = signed_request(controller.rstrip('/') + '/api/poll', token, {"agent_id":agent_id, "status":agent.command("get_status", {})}, socks_port)
-            for command in result.get("commands", []):
-                try: signed_request(controller.rstrip('/') + '/api/ack', token, {"agent_id":agent_id, "command_id":command["id"], "result":agent.command(command["name"], command.get("payload", {}))}, socks_port)
-                except Exception as error: signed_request(controller.rstrip('/') + '/api/ack', token, {"agent_id":agent_id, "command_id":command.get("id"), "error":str(error)}, socks_port)
-        except Exception: pass
+            commands = result.get("commands", [])
+            log.debug("poll ok (%d command(s) queued)", len(commands))
+            for command in commands:
+                try:
+                    signed_request(controller.rstrip('/') + '/api/ack', token, {"agent_id":agent_id, "command_id":command["id"], "result":agent.command(command["name"], command.get("payload", {}))}, socks_port)
+                except Exception as error:
+                    log.warning("command %s failed: %s", command.get("name"), error)
+                    signed_request(controller.rstrip('/') + '/api/ack', token, {"agent_id":agent_id, "command_id":command.get("id"), "error":str(error)}, socks_port)
+        except Exception as error:
+            # Most common causes: Tor SocksPort not listening, onion address/token
+            # mismatch (HTTP 401 from the controller), or no PySocks support in
+            # whichever python interpreter actually runs this file.
+            log.warning("poll to %s failed: %s: %s", controller, type(error).__name__, error)
         time.sleep(interval)
 
 def main():
-    parser = argparse.ArgumentParser(); parser.add_argument("--state", default=DEFAULT_STATE); parser.add_argument("--dry-run", action="store_true"); parser.add_argument("--controller"); parser.add_argument("--agent-id"); parser.add_argument("--token"); parser.add_argument("--poll-seconds", type=int, default=30); parser.add_argument("--socks-port", type=int, default=9050)
-    args = parser.parse_args(); agent = Agent(args.state, args.dry_run)
-    if args.controller and args.agent_id and args.token: poll(agent, args.controller, args.agent_id, args.token, max(5, args.poll_seconds), args.socks_port)
-    else: print(json.dumps(agent.command("get_status", {}), indent=2))
+    parser = argparse.ArgumentParser(); parser.add_argument("--state", default=DEFAULT_STATE); parser.add_argument("--dry-run", action="store_true"); parser.add_argument("--controller"); parser.add_argument("--agent-id"); parser.add_argument("--token"); parser.add_argument("--poll-seconds", type=int, default=30); parser.add_argument("--socks-port", type=int, default=9050); parser.add_argument("--verbose", action="store_true", help="log every poll attempt, not just failures")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    agent = Agent(args.state, args.dry_run)
+    if args.controller and args.agent_id and args.token:
+        log.info("starting poll loop: controller=%s agent_id=%s socks_port=%s poll_seconds=%s", args.controller, args.agent_id, args.socks_port, max(5, args.poll_seconds))
+        poll(agent, args.controller, args.agent_id, args.token, max(5, args.poll_seconds), args.socks_port)
+    else:
+        # This is the quiet failure mode that makes the service look "active" while
+        # doing nothing: no --controller/--agent-id/--token means we never enter the
+        # poll loop at all, we just print status once and exit (then systemd restarts
+        # us in 15s and we do it again, forever, with no network activity).
+        log.warning("no --controller/--agent-id/--token given — printing status once and exiting instead of polling")
+        print(json.dumps(agent.command("get_status", {}), indent=2))
 if __name__ == "__main__": main()

@@ -5,7 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/meowdeploy/meowdeploy_agent.py
+# Must be the venv python (requests[socks] / PySocks live there, not in system
+# python3) and must carry real --controller/--agent-id/--token values. If these
+# three flags are ever missing or left as placeholders, the agent prints its
+# status once and exits instead of polling — Restart=always then makes that
+# look like a healthy "active" service while it does nothing. Replace the
+# REPLACE_WITH_* values below (or let deployment/install-agent.sh's sed step
+# do it) before starting this unit for real.
+ExecStart=/opt/meowdeploy/venv/bin/python3 /opt/meowdeploy/meowdeploy_agent.py --controller http://REPLACE_WITH_ONION_HOSTNAME.onion:18765 --agent-id REPLACE_WITH_AGENT_ID --token REPLACE_WITH_TOKEN --socks-port 9050 --poll-seconds 30
 Restart=always
 RestartSec=15
 User=root
