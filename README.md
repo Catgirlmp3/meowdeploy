@@ -1,143 +1,199 @@
 # MeowDeploy
 
-MeowDeploy is intended to be a Windows fleet controller and a standalone Linux agent/miner installer. The controller and agent prototype exist, but the all-in-one Linux installer is **not yet implemented**. The current installer deliberately refuses a full install; `--agent-only` is for protocol testing and does not install mining, huge pages, or MSR tuning.
+MeowDeploy is a Windows fleet controller plus a Debian/Ubuntu node installer. The
+controller authenticates agents with a shared HMAC token and exposes a localhost-only
+API through a Tor onion service. Agents poll outbound through Tor, apply a small
+allowlist of commands, and keep their schedule locally when the controller is offline.
 
-This guide first describes the complete intended installation as a dry-run scenario, then gives the safe commands that are actually available today.
+Use it only on hosts you own or are explicitly authorized to administer. Mining can
+violate a hosting provider's terms, and a controller token is effectively a root-level
+fleet credential. Review the installer before running it.
 
-## Intended full-install walkthrough (simulation, not executed on a host)
+## What is implemented
 
-This is how the finished root-shell installer should behave on one Debian/Proxmox host. Expected outputs below are illustrative. No commands in this section were run against your VM.
+- One-command full node install: Tor, Python venv, agent, XMRig, systemd units,
+  huge-page helper, optional MSR setup, and verification.
+- Agent-only install for protocol testing or hosts that already run a miner.
+- Config-driven agent (`/etc/meowdeploy/agent.json`, mode `0600`); tokens are not
+  embedded in the systemd unit or process command line.
+- Per-host CPU math based on the host's actual `nproc`, not a hard-coded 20 cores.
+- Schedule and override evaluation that continues while the controller is offline.
+- Controller auto-registration: an agent id is added to the dashboard on its first
+  authenticated poll, even when it differs from the IP address in the server list.
+- Command IDs with agent-side deduplication, controller-side pending queues, and
+  best-effort persistence across controller restarts.
+- Stop/start/restart, schedule, override, status, health metrics, temperature,
+  hashrate, miner service state, and diagnostics in the WinForms UI.
+- A safe SSH deployer for the agent only. It runs a fixed install sequence and does
+  not accept arbitrary shell commands.
 
-### 1. Start from the Windows controller
+## Quick start
 
-I would start the dedicated Tor instance and check the controller onion file:
+### 1. Start the controller
+
+Set a real token before launching anything that is reachable through Tor:
 
 ```powershell
-Get-Content C:\Tools\meowdeploy-tor\hidden_service\hostname
-```
-
-Expected: your controller onion hostname. I would start the app with the same shared test token configured on the Linux agent:
-
-```powershell
-$env:MEOWDEPLOY_TOKEN = 'meowmeowmeow'
+$env:MEOWDEPLOY_TOKEN = 'replace-with-a-long-random-secret'
 dotnet run --project controller\MeowDeploy.Controller.csproj
 ```
 
-Expected: the WinForms dashboard opens and the local API listens on `127.0.0.1:18765`.
+The controller listens on `127.0.0.1:18765`. Expose that listener with a Tor onion
+service; do not bind it to the LAN. See [docs/TOR_SETUP.md](docs/TOR_SETUP.md).
 
-### 2. Paste one installer command into the VM root shell
+The fallback token `meowmeowmeow` exists only so a local UI smoke test can start
+without configuration. Do not use it on a real fleet.
 
-The intended full installer command is:
+### 2. Install a node
+
+On each Debian/Ubuntu x86_64 host, as root:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp/deployment/install-agent.sh | bash -s -- \
-  --controller http://2zcfiyzbxs7x7ige2qj7iorncwzw2ua6p77qc6gi77o3dpy4olszosqd.onion:18765 \
+  --controller http://YOUR_CONTROLLER_ONION.onion:18765 \
   --agent-id "$(hostname -s)" \
-  --token meowmeowmeow \
+  --token 'replace-with-the-same-long-random-secret' \
   --cpu-percent 30
 ```
 
-The finished installer should show a short menu before making changes:
+The installer prints the host, agent id, controller, CPU quota, pool, and wallet before
+changing anything and requires you to type `install`. For a reviewed, unattended
+deployment, add `--yes` after verifying those values. To print the resolved plan
+without touching the host, add `--dry-run`.
 
-```text
-MeowDeploy host setup
-[1] Install agent and miner (recommended)
-[2] Install agent only
-[3] Repair/update existing installation
-[4] Uninstall MeowDeploy components
-Choose [1-4]:
-```
-
-I would choose `1`. It should confirm the host, controller onion, wallet destination, pool, and CPU cap before proceeding. Mining should not begin until the operator confirms the displayed values.
-
-### 3. Intended automatic setup and checks
-
-The installer should then:
-
-1. Check root privileges, Debian architecture, systemd, disk space, and whether paths already contain unrelated files.
-2. Install Tor, Python, certificates, curl, and required packages. It should append a loopback SOCKS listener to existing Tor configuration only if absent, preserve all other lines, restart Tor, and confirm the SOCKS port is listening.
-3. Download the MeowDeploy agent and standalone miner files into MeowDeploy-owned paths (planned: `/opt/meowdeploy`, `/etc/meowdeploy`, `/var/lib/meowdeploy`). It must not clone or invoke MeowKit.
-4. Download XMRig release metadata and the Linux asset. It must check the published SHA-256 digest, retry a bounded number of times, remove corrupt temporary artifacts, and stop with a useful error if verification still fails.
-5. Write the miner JSON using the MeowKit pool and wallet values, but use MeowDeploy paths and service names. Validate it as JSON and check required values are present before atomically installing it with root-only permissions.
-6. Configure the full detected CPU worker range, then apply 30% of the 20-core processor as `CPUQuota=600%`. CPU quota, not a P-core-only thread restriction, controls the ceiling.
-7. Configure 2 MiB huge pages within a conservative memory budget. Try 1 GiB pages only when the kernel exposes them; inability to allocate them should be reported and should not abort installation.
-8. Attempt MSR setup only where supported. A denied or unsupported MSR operation should be logged and treated as an optimization failure, not as a reason to weaken host security.
-9. Create `meowdeploy-agent.service` and a separate `meowdeploy-miner.service`. Installation and normal operation should not stream logs into the shell. The app should show host state, hashrate, and CPU temperature; error details belong behind an in-app diagnostics view.
-10. Validate generated systemd units, reload systemd, start services, check their active state, check the agent's Tor connection, and report each result.
-
-Expected successful summary:
-
-```text
-Agent service: active
-Miner service: active
-Tor SOCKS: listening on 127.0.0.1:9050
-CPU quota: 600% (30% of 20 cores)
-Miner config: valid
-Huge pages: configured or explicitly reported unavailable
-MSR: enabled or explicitly reported unavailable
-Controller: reachable through Tor (first check-in may take up to one poll interval)
-```
-
-### 4. Intended controller check
-
-I would wait for the host to show Online, then confirm the displayed CPU allocation is 30%. I would use the app to issue a short test override (for example 20% for 5 minutes), verify the agent acknowledges it, and confirm it returns to the schedule when it expires. Disconnecting the Windows controller must not stop the local schedule.
-
-### 5. What the current code would actually do
-
-The full command above currently exits immediately with status 3 and explains that full standalone miner installation is not implemented. This is intentional: the current agent still targets `meowkit.service`, and no MeowDeploy-owned miner service or validated XMRig installer exists yet. Do not use the simulated success output as evidence of a real installation.
-
-## Available safe checks today
-
-Build the Windows controller:
-
-```powershell
-dotnet build controller\MeowDeploy.Controller.csproj -c Release
-```
-
-Compile-check the Python agent:
-
-```powershell
-python -m py_compile agent\meowdeploy_agent.py
-```
-
-Run agent-only installer mode only when intentionally testing the controller agent path:
+Agent-only mode installs Tor and the agent but no miner, huge pages, or MSR tuning:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp/deployment/install-agent.sh | bash -s -- \
-  --controller http://2zcfiyzbxs7x7ige2qj7iorncwzw2ua6p77qc6gi77o3dpy4olszosqd.onion:18765 \
-  --agent-id "$(hostname -s)" --token meowmeowmeow --agent-only
+  --controller http://YOUR_CONTROLLER_ONION.onion:18765 \
+  --agent-id "$(hostname -s)" \
+  --token 'replace-with-the-same-long-random-secret' \
+  --agent-only --yes
 ```
 
-Agent-only mode does not configure a miner. For local Python tests, install `agent/requirements.txt` and `pytest`, then run `python -m pytest -q` from the repository root.
+The installer writes:
 
-## Useful host commands (once installed)
+| Path | Purpose |
+| --- | --- |
+| `/opt/meowdeploy/meowdeploy_agent.py` | Agent |
+| `/opt/meowdeploy/venv` | Python dependencies (`requests[socks]`, PySocks) |
+| `/etc/meowdeploy/agent.json` | Controller URL, agent id, token, state path (mode `0600`) |
+| `/etc/meowdeploy/miner.json` | XMRig config (full install only, mode `0600`) |
+| `/var/lib/meowdeploy/state.json` | Local schedule, override, last apply, command dedupe |
+| `/etc/systemd/system/meowdeploy-agent.service` | Agent unit |
+| `/etc/systemd/system/meowdeploy-miner.service` | Miner unit (full install only) |
+
+### 3. Verify
 
 ```bash
-# Overall service state
-systemctl status meowdeploy-agent.service meowdeploy-miner.service tor
-
-# Check Tor SOCKS listener
-ss -ltnp | grep 9050
-
-# Show effective miner quota
+systemctl status meowdeploy-agent.service meowdeploy-miner.service tor --no-pager
 systemctl show meowdeploy-miner.service -p CPUQuotaPerSecUSec -p ActiveState
-
-# Restart agent / miner
-systemctl restart meowdeploy-agent.service
-systemctl restart meowdeploy-miner.service
-
-# Stop / start miner quickly
-systemctl stop meowdeploy-miner.service
-systemctl start meowdeploy-miner.service
+ss -ltnp | grep 9050
+journalctl -u meowdeploy-agent.service -n 50 --no-pager
 ```
 
-Those service names are the planned standalone names. They are not installed by the current agent-only prototype. The commands above are quiet status/control commands; no log tail is part of the normal workflow.
+The agent does not print its status to the shell in normal service operation. Use
+`journalctl` for errors and the controller's diagnostics panel for current health.
 
-## Current limitations
+## Agent-only deployment over SSH
 
-- The agent/controller command protocol needs durable acknowledgements and retry tracking before fleet use.
-- The agent currently manages `meowkit.service`; that integration must be replaced by the standalone MeowDeploy miner service.
-- Schedule expiry needs a persistent local evaluation loop and rollback handling.
-- Per-agent secrets and protected Windows credential storage are not implemented.
-- Live hashrate and CPU utilization are not implemented.
-- Full-install, rollback, and uninstall flows have not been executed on a disposable Linux VM.
+`deployment/deploy.py` is for an already-provisioned host. It uploads the agent,
+requirements, service unit, and a generated `agent.json`, creates the venv, removes
+the old token-in-`ExecStart` drop-in, and verifies the service. It does **not** install
+the miner.
+
+```text
+deployment/servers.txt
+  172.16.3.3 vm-03
+  172.16.3.4 vm-04
+```
+
+```powershell
+python -m pip install -r deployment\requirements.txt
+$env:MEOWDEPLOY_TOKEN = 'replace-with-the-shared-token'
+python deployment\deploy.py `
+  --servers deployment\servers.txt `
+  --controller http://YOUR_CONTROLLER_ONION.onion:18765
+```
+
+The deployer uses `~/.ssh/known_hosts` and does not auto-add unknown host keys. The
+root password is held in memory for the session only. It caps concurrency at five.
+
+## Configuration
+
+The agent resolves values in this order: command line, environment, JSON config,
+built-in default. The systemd unit passes only `--config /etc/meowdeploy/agent.json`.
+
+Example config:
+
+```json
+{
+  "controller": "http://YOUR_CONTROLLER_ONION.onion:18765",
+  "agent_id": "vm-03",
+  "token": "replace-with-the-shared-token",
+  "state_path": "/var/lib/meowdeploy/state.json",
+  "miner_service": "meowdeploy-miner.service",
+  "socks_port": 9050,
+  "poll_seconds": 30
+}
+```
+
+Keep the file mode `0600` and owned by root. To rotate the token, update this file on
+each agent and restart `meowdeploy-agent.service`; then update `MEOWDEPLOY_TOKEN` and
+restart the controller.
+
+CPU percentages are relative to the host's available CPUs. On an 8-core host, 30%
+becomes `CPUQuota=240%`; on a 20-core host it becomes `600%`. The agent uses the CPU
+affinity mask when available, so a systemd `CPUAffinity` restriction is respected.
+
+## Controller operation
+
+- **Servers** are persisted in `%APPDATA%\MeowDeploy\servers.json`.
+- **Discovered agents** are merged automatically after their first authenticated poll.
+- **Pending commands** are persisted best-effort in
+  `%APPDATA%\MeowDeploy\pending-commands.json`.
+- **Commands** are redelivered until the agent acknowledges them. The agent remembers
+  the last 200 command ids so a lost acknowledgement does not re-run a command.
+- **Schedules** are local JSON state. The agent keeps applying the schedule and
+  override expiry while the controller is offline.
+- **Status** includes effective CPU, core count, state, miner service state, load,
+  temperature when available, hashrate from the restricted localhost XMRig API, and
+  any metric-collection errors.
+
+## Security model
+
+- The controller API binds to `127.0.0.1` only; Tor exposes it as an onion service.
+- Every request is HMAC-SHA256 signed with the shared token.
+- The agent never executes controller-supplied shell text. It supports only:
+  `set_schedule`, `temporary_override`, `clear_override`, `apply_now`, `get_status`,
+  `start_miner`, `stop_miner`, and `restart_miner`.
+- The installer verifies the XMRig release digest from GitHub before installing it.
+- MSR and huge-page failures are treated as optimization failures, not reasons to
+  weaken kernel or host security.
+- Agent tokens live in a root-only config file. The old `--token`-on-the-command-line
+  drop-in is removed by both install paths.
+
+Limitations still worth knowing:
+
+- The shared token is fleet-wide; per-agent credentials and Windows credential storage
+  are not implemented.
+- The controller's pending queue is best-effort and in-memory plus a JSON file; it is
+  not a transactional database.
+- The HMAC request format does not yet include a nonce/timestamp, so it does not have
+  full replay protection against an attacker who can observe and immediately replay a
+  request inside Tor.
+- Full-install, rollback, and uninstall flows should still be exercised on a disposable
+  VM before production use.
+- `deploy.py` intentionally does not install the miner; use `install-node.sh` for that.
+
+## Tests
+
+```powershell
+python -m pytest -q
+dotnet build controller\MeowDeploy.Controller.csproj -c Release
+python -m py_compile agent\meowdeploy_agent.py deployment\deploy.py
+```
+
+The Python tests cover schedule validation, overrides, per-core quota math, command
+deduplication, and the stop-miner regression where a stop used to be followed by an
+unconditional restart.

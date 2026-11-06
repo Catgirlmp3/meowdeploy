@@ -24,17 +24,27 @@ internal static class Program
 // ----------------------------------------------------------------------
 public sealed class ControllerApi : IDisposable
 {
+    const int MaxRequestBytes = 1_048_576;
+    static readonly TimeSpan OnlineTimeout = TimeSpan.FromMinutes(2);
+    static readonly TimeSpan CommandTtl = TimeSpan.FromHours(24);
+
     readonly HttpListener listener = new();
-    readonly ConcurrentDictionary<string, ConcurrentQueue<Command>> queues = new();
-    readonly ConcurrentDictionary<string, DateTime> checkins = new();
+    readonly ConcurrentDictionary<string, ConcurrentDictionary<string, Command>> pending = new(StringComparer.OrdinalIgnoreCase);
+    readonly ConcurrentDictionary<string, DateTime> checkins = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, HostState> hostStates = new(StringComparer.OrdinalIgnoreCase);
     readonly object stateGate = new();
-    static readonly TimeSpan OnlineTimeout = TimeSpan.FromMinutes(2);
-    readonly ConcurrentDictionary<string, JsonElement> statuses = new();
+    readonly ConcurrentDictionary<string, JsonElement> statuses = new(StringComparer.OrdinalIgnoreCase);
     readonly string token = Environment.GetEnvironmentVariable("MEOWDEPLOY_TOKEN") ?? "meowmeowmeow";
     readonly CancellationTokenSource stop = new();
+    readonly object queueGate = new();
+    readonly string queueFile = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MeowDeploy", "pending-commands.json");
 
-    public ControllerApi() => listener.Prefixes.Add("http://127.0.0.1:18765/");
+    public ControllerApi()
+    {
+        listener.Prefixes.Add("http://127.0.0.1:18765/");
+        LoadPending();
+    }
 
     public void Start()
     {
@@ -57,38 +67,92 @@ public sealed class ControllerApi : IDisposable
 
     async Task Handle(HttpListenerContext context)
     {
-        using var stream = new MemoryStream();
-        await context.Request.InputStream.CopyToAsync(stream);
-        var raw = stream.ToArray();
-
-        if (!Auth(context.Request, raw))
+        try
         {
-            context.Response.StatusCode = 401;
-            context.Response.Close();
-            return;
+            if (context.Request.ContentLength64 > MaxRequestBytes)
+            {
+                await Write(context, new { error = "request too large" }, 413);
+                return;
+            }
+
+            using var stream = new MemoryStream();
+            await context.Request.InputStream.CopyToAsync(stream);
+            var raw = stream.ToArray();
+            if (raw.Length > MaxRequestBytes)
+            {
+                await Write(context, new { error = "request too large" }, 413);
+                return;
+            }
+
+            if (!Auth(context.Request, raw))
+            {
+                await Write(context, new { error = "unauthorized" }, 401);
+                return;
+            }
+
+            JsonElement data;
+            try
+            {
+                data = JsonSerializer.Deserialize<JsonElement>(raw);
+            }
+            catch (JsonException)
+            {
+                await Write(context, new { error = "invalid json" }, 400);
+                return;
+            }
+
+            if (data.ValueKind != JsonValueKind.Object
+                || !data.TryGetProperty("agent_id", out var idProperty)
+                || idProperty.ValueKind != JsonValueKind.String)
+            {
+                await Write(context, new { error = "agent_id required" }, 400);
+                return;
+            }
+
+            var id = idProperty.GetString() ?? "";
+            if (string.IsNullOrWhiteSpace(id) || id.Length > 128)
+            {
+                await Write(context, new { error = "invalid agent_id" }, 400);
+                return;
+            }
+
+            var path = context.Request.Url!.AbsolutePath.TrimEnd('/');
+            if (path is not "/api/poll" and not "/api/ack")
+            {
+                await Write(context, new { error = "not found" }, 404);
+                return;
+            }
+
+            Touch(id);
+            if (path == "/api/poll")
+            {
+                if (data.TryGetProperty("status", out var status)) statuses[id] = status;
+                await Write(context, new { commands = Drain(id) });
+                return;
+            }
+
+            var commandId = data.TryGetProperty("command_id", out var commandProperty)
+                && commandProperty.ValueKind == JsonValueKind.String
+                ? commandProperty.GetString()
+                : null;
+            var removed = !string.IsNullOrWhiteSpace(commandId) && Ack(id, commandId!);
+            await Write(context, new { ok = true, removed });
         }
-
-        var data = JsonSerializer.Deserialize<JsonElement>(raw);
-        var id = data.GetProperty("agent_id").GetString()!;
-        var checkedInAt = DateTime.UtcNow;
-        lock (stateGate)
+        catch
         {
-            var wasOnline = checkins.TryGetValue(id, out var previousCheckin)
-                && checkedInAt - previousCheckin < OnlineTimeout;
-            checkins[id] = checkedInAt;
-            if (!wasOnline || !hostStates.ContainsKey(id))
-                hostStates[id] = new HostState(true, checkedInAt);
+            try
+            {
+                context.Response.StatusCode = 500;
+                context.Response.Close();
+            }
+            catch { /* response may already be closed */ }
         }
-        if (data.TryGetProperty("status", out var status)) statuses[id] = status;
+    }
 
-        object result = context.Request.Url!.AbsolutePath switch
-        {
-            "/api/poll" => new { commands = Drain(id) },
-            "/api/ack" => new { ok = true },
-            _ => new { error = "not found" }
-        };
-
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(result);
+    static async Task Write(HttpListenerContext context, object value, int statusCode = 200)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+        context.Response.StatusCode = statusCode;
         context.Response.ContentType = "application/json";
         await context.Response.OutputStream.WriteAsync(bytes);
         context.Response.Close();
@@ -103,16 +167,52 @@ public sealed class ControllerApi : IDisposable
             Encoding.ASCII.GetBytes(expected));
     }
 
-    object[] Drain(string id)
+    void Touch(string id)
     {
-        var q = queues.GetOrAdd(id, _ => new());
-        var items = new List<Command>();
-        while (q.TryDequeue(out var item)) items.Add(item);
-        return items.Cast<object>().ToArray();
+        var now = DateTime.UtcNow;
+        lock (stateGate)
+        {
+            var wasOnline = checkins.TryGetValue(id, out var previousCheckin)
+                && now - previousCheckin < OnlineTimeout;
+            checkins[id] = now;
+            if (!wasOnline || !hostStates.ContainsKey(id))
+                hostStates[id] = new HostState(true, now);
+        }
     }
 
-    public void Queue(string id, string name, object payload) =>
-        queues.GetOrAdd(id, _ => new()).Enqueue(new Command(Guid.NewGuid().ToString("N"), name, payload));
+    object[] Drain(string id)
+    {
+        if (!pending.TryGetValue(id, out var queue)) return Array.Empty<object>();
+
+        var cutoff = DateTime.UtcNow - CommandTtl;
+        foreach (var command in queue.Values.Where(c => c.created_utc < cutoff).ToList())
+            queue.TryRemove(command.id, out _);
+
+        var commands = queue.Values.OrderBy(c => c.created_utc).Cast<object>().ToArray();
+        if (queue.IsEmpty)
+        {
+            pending.TryRemove(id, out _);
+            SavePending();
+        }
+        return commands;
+    }
+
+    public void Queue(string id, string name, object payload)
+    {
+        var command = new Command(Guid.NewGuid().ToString("N"), name, payload, id, DateTime.UtcNow);
+        pending.GetOrAdd(id, _ => new ConcurrentDictionary<string, Command>(StringComparer.Ordinal))
+            .TryAdd(command.id, command);
+        SavePending();
+    }
+
+    bool Ack(string id, string commandId)
+    {
+        if (!pending.TryGetValue(id, out var queue)) return false;
+        var removed = queue.TryRemove(commandId, out _);
+        if (queue.IsEmpty) pending.TryRemove(id, out _);
+        if (removed) SavePending();
+        return removed;
+    }
 
     public bool TryStatus(string id, out JsonElement status) => statuses.TryGetValue(id, out status);
 
@@ -145,15 +245,61 @@ public sealed class ControllerApi : IDisposable
         }
     }
 
+    // Agents register themselves the first time they poll. The dashboard merges
+    // this set into its saved host list, so an operator does not have to guess
+    // whether the agent id is a hostname, an IP, or an onion label.
+    public IReadOnlyCollection<string> KnownAgents => checkins.Keys.ToArray();
+
     public IReadOnlyDictionary<string, DateTime> Checkins => checkins;
     public readonly record struct HostState(bool Online, DateTime SinceUtc);
+    public sealed record Command(string id, string name, object payload, string agent_id, DateTime created_utc);
 
-    public record Command(string id, string name, object payload);
+    void LoadPending()
+    {
+        try
+        {
+            if (!File.Exists(queueFile)) return;
+            var commands = JsonSerializer.Deserialize<List<Command>>(File.ReadAllText(queueFile));
+            if (commands is null) return;
+            var cutoff = DateTime.UtcNow - CommandTtl;
+            foreach (var command in commands)
+            {
+                if (command is null
+                    || string.IsNullOrWhiteSpace(command.id)
+                    || string.IsNullOrWhiteSpace(command.name)
+                    || string.IsNullOrWhiteSpace(command.agent_id)
+                    || command.created_utc < cutoff)
+                    continue;
+                pending.GetOrAdd(command.agent_id, _ => new ConcurrentDictionary<string, Command>(StringComparer.Ordinal))
+                    .TryAdd(command.id, command);
+            }
+        }
+        catch { /* a corrupt queue file must not prevent the controller from starting */ }
+    }
+
+    void SavePending()
+    {
+        lock (queueGate)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(queueFile)!);
+                var commands = pending.Values.SelectMany(queue => queue.Values)
+                    .OrderBy(command => command.created_utc)
+                    .ToList();
+                var tmp = queueFile + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(commands));
+                File.Move(tmp, queueFile, true);
+            }
+            catch { /* command delivery remains usable in memory if persistence fails */ }
+        }
+    }
 
     public void Stop()
     {
         stop.Cancel();
         listener.Stop();
+        SavePending();
     }
 
     public void Dispose() => Stop();
@@ -339,10 +485,10 @@ public sealed class Dashboard : Form
         scheduleTab.Controls.Add(BuildScheduleEditor());
 
         var deployTab = new TabPage("Deployment") { BackColor = Theme.Bg };
-        deployTab.Controls.Add(InfoLabel("Deployment\n\nRun deployment/deploy.py after reviewing SSH host keys. Results appear in the terminal and can be audited per host."));
+        deployTab.Controls.Add(InfoLabel("Deployment\n\nRun deployment/deploy.py after reviewing SSH host keys. It writes /etc/meowdeploy/agent.json (mode 0600), creates the venv, and verifies the service. It never runs arbitrary remote commands."));
 
         var settingsTab = new TabPage("Settings") { BackColor = Theme.Bg };
-        settingsTab.Controls.Add(InfoLabel("Settings\n\nController API: 127.0.0.1:18765\nAuthentication: HMAC token\nDefault test token: meowmeowmeow"));
+        settingsTab.Controls.Add(InfoLabel("Settings\n\nController API: 127.0.0.1:18765\nAuthentication: HMAC token\nSet MEOWDEPLOY_TOKEN before launch for anything beyond local testing.\nAgent config: /etc/meowdeploy/agent.json (mode 0600)"));
 
         navigationTabs.TabPages.AddRange(new[] { dashboardTab, serversTab, scheduleTab, deployTab, settingsTab });
         navigationTabs.Appearance = TabAppearance.FlatButtons;
@@ -626,7 +772,7 @@ public sealed class Dashboard : Form
             grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = c.Item1, Name = c.Item2, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 88 });
 
         var menu = new ContextMenuStrip();
-        foreach (var item in new[] { ("Set CPU…", "temporary_override"), ("Start miner", "start_miner"), ("Stop miner", "stop_miner"), ("Restart miner", "restart_miner"), ("Clear override", "clear_override") })
+        foreach (var item in new[] { ("Set CPU…", "temporary_override"), ("Apply now", "apply_now"), ("Start miner", "start_miner"), ("Stop miner", "stop_miner"), ("Restart miner", "restart_miner"), ("Clear override", "clear_override") })
         {
             var mi = menu.Items.Add(item.Item1);
             mi.Click += (_, _) => SendSelected(item.Item2);
@@ -662,8 +808,28 @@ public sealed class Dashboard : Form
                     cell.Style = new DataGridViewCellStyle(cell.Style) { ForeColor = Theme.Dim, Font = new Font(grid.Font, FontStyle.Italic) };
     }
 
+    // Agents announce their own id in the first authenticated poll. Merge those
+    // ids into the saved list so discovery works even when the agent id is a
+    // hostname rather than the IP address the operator typed.
+    void SyncDiscoveredAgents()
+    {
+        var changed = false;
+        foreach (var agent in api.KnownAgents)
+        {
+            if (hosts.Any(host => string.Equals(host, agent, StringComparison.OrdinalIgnoreCase))) continue;
+            hosts.Add(agent);
+            grid.Rows.Add(agent, "● Offline", "—", "—", "—", "Never", "—", "—", "—");
+            changed = true;
+        }
+        if (!changed) return;
+        SaveHosts();
+        ApplyEmptyStateStyle();
+    }
+
     void RefreshRows()
     {
+        SyncDiscoveredAgents();
+
         var onlineCount = 0;
         var cpuSamples = new List<double>();
         var fleetSnapshot = new List<(string Host, bool Online, double? Hashrate, double? Temp, TimeSpan? OnlineFor)>();
@@ -765,13 +931,14 @@ public sealed class Dashboard : Form
         detailsTitle.Height = 40;
 
         detailsBody.Dock = DockStyle.Top;
-        detailsBody.Height = 150;
+        detailsBody.Height = 210;
         detailsBody.FlowDirection = FlowDirection.TopDown;
         detailsBody.WrapContents = false;
         RenderEmptyDetails();
 
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 180, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 230, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         buttons.Controls.Add(Action("Set CPU allocation", (_, _) => SendSelected("temporary_override")));
+        buttons.Controls.Add(Action("Apply now", (_, _) => SendSelected("apply_now")));
         buttons.Controls.Add(Action("Clear override", (_, _) => SendSelected("clear_override")));
         buttons.Controls.Add(Action("Restart miner", (_, _) => SendSelected("restart_miner")));
         buttons.Controls.Add(Action("Get status", (_, _) => SendSelected("get_status")));
@@ -834,6 +1001,23 @@ public sealed class Dashboard : Form
         detailsBody.Controls.Add(DetailRow($"Hashrate  {hash}", hash == "—" ? Theme.Dim : Theme.Text));
         detailsBody.Controls.Add(DetailRow($"Uptime  {uptime}", uptime == "—" ? Theme.Dim : Theme.Text));
         detailsBody.Controls.Add(DetailRow($"Last check-in  {lastCheckin}", lastCheckin == "Never" ? Theme.Dim : Theme.Text));
+
+        var miner = metrics.ValueKind == JsonValueKind.Object
+            && metrics.TryGetProperty("miner_active", out var minerValue)
+            && minerValue.ValueKind == JsonValueKind.String
+            ? minerValue.GetString() ?? "—"
+            : "—";
+        detailsBody.Controls.Add(DetailRow($"Miner service  {miner}", miner == "active" ? Theme.Good : Theme.Dim));
+
+        if (metrics.ValueKind == JsonValueKind.Object
+            && metrics.TryGetProperty("errors", out var errors)
+            && errors.ValueKind == JsonValueKind.Array
+            && errors.GetArrayLength() > 0)
+        {
+            var first = errors[0].GetString();
+            detailsBody.Controls.Add(DetailRow(
+                $"Diagnostics  {errors.GetArrayLength()} issue(s): {first}", Theme.Warn));
+        }
     }
 
     static string FormatDuration(TimeSpan duration)
@@ -951,9 +1135,11 @@ public sealed class Dashboard : Form
     // ------------------------------------------------------------------
     void AddServer()
     {
-        var host = PromptText("Add server", "IPv4 address or onion hostname", "172.16.3.");
+        var host = PromptText("Add server", "Agent ID, IP address, or onion hostname", "172.16.3.");
         host = host?.Trim();
-        if (string.IsNullOrWhiteSpace(host) || hosts.Contains(host)) return;
+        if (string.IsNullOrWhiteSpace(host)
+            || hosts.Any(existing => string.Equals(existing, host, StringComparison.OrdinalIgnoreCase)))
+            return;
         hosts.Add(host);
         SaveHosts();
         grid.Rows.Add(host, "○ Offline", "—", "—", "—", "Never", "—", "—", "—");

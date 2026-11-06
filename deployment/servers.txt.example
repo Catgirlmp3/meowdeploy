@@ -1,18 +1,6 @@
-172.16.3.3
-172.16.3.4
+# SSH host [optional agent id]
+# The agent id defaults to the host string. It may differ from the SSH address:
+# the controller discovers the id when the agent makes its first poll.
+172.16.3.3 vm-03
+172.16.3.4 vm-04
 172.16.3.5
-172.16.3.6
-172.16.3.7
-172.16.3.8
-172.16.3.9
-172.16.3.10
-172.16.3.11
-172.16.3.12
-172.16.3.13
-172.16.3.14
-172.16.3.15
-172.16.3.16
-172.16.3.17
-172.16.3.18
-172.16.3.19
-172.16.3.20

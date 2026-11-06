@@ -1,15 +1,78 @@
 # Installation
 
-Build the controller with `dotnet build controller/MeowDeploy.Controller.csproj -c Release`. Run agent tests with `python -m pytest` from the repository root. Review SSH host keys before running `python deployment/deploy.py --servers deployment/servers.txt`; the deployer prompts once for the root password and caps concurrency at five.
+Build the controller:
 
-On a host, the agent is installed under `/opt/meowdeploy`, its state is `/var/lib/meowdeploy/state.json`, and its service is `meowdeploy-agent.service`. The service is visible in journald: `journalctl -u meowdeploy-agent`.
-
-## One-line host installation
-
-After the branch is pushed to GitHub, paste this into a root shell on each Debian/Proxmox host. It installs Tor, Python dependencies, the agent service, and MeowKit mining at the default 75% allocation. Add `--skip-meowkit` if the miner is already installed.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp/deployment/install-agent.sh | bash -s -- --controller http://YOUR_CONTROLLER_ONION.onion:18765 --agent-id "$(hostname -s)" --token meowmeowmeow
+```powershell
+dotnet build controller\MeowDeploy.Controller.csproj -c Release
 ```
 
-The installer is idempotent and appends to `/etc/tor/torrc` only when a local `SocksPort` is missing. It does not replace the existing Tor configuration. Review the script before using it on production hosts.
+Run the tests:
+
+```powershell
+python -m pytest -q
+python -m py_compile agent\meowdeploy_agent.py deployment\deploy.py
+```
+
+## Full node
+
+Run as root on Debian/Ubuntu x86_64. The installer asks for confirmation unless you
+pass `--yes`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp/deployment/install-agent.sh | bash -s -- \
+  --controller http://YOUR_CONTROLLER_ONION.onion:18765 \
+  --token 'replace-with-a-long-random-token' \
+  --cpu-percent 30
+```
+
+The script installs Tor, a Python venv, the agent, and XMRig. It verifies the XMRig
+release digest, writes root-only config files, validates the systemd units, starts the
+services, and prints a failure diagnostic instead of claiming success when a unit is
+not active. Add `--dry-run` to print the resolved host plan without changing anything.
+
+## Agent only
+
+Use `--agent-only` when the host already has a miner or when you are testing the
+control plane:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp/deployment/install-agent.sh | bash -s -- \
+  --controller http://YOUR_CONTROLLER_ONION.onion:18765 \
+  --token 'replace-with-a-long-random-token' \
+  --agent-only --yes
+```
+
+For SSH-based agent-only deployment, copy `deployment/servers.txt.example` to
+`deployment/servers.txt`, add `host [agent-id]` lines, and run:
+
+```powershell
+python -m pip install -r deployment\requirements.txt
+$env:MEOWDEPLOY_TOKEN = 'replace-with-a-long-random-token'
+python deployment\deploy.py --servers deployment\servers.txt `
+  --controller http://YOUR_CONTROLLER_ONION.onion:18765
+```
+
+`deploy.py` uses the known-host database, prompts once for the root password, uploads
+the reviewed files, creates the venv, writes `/etc/meowdeploy/agent.json` with mode
+`0600`, and verifies the service. It does not install the miner.
+
+## Paths
+
+- Agent: `/opt/meowdeploy/meowdeploy_agent.py`
+- Python venv: `/opt/meowdeploy/venv`
+- Agent config: `/etc/meowdeploy/agent.json` (mode `0600`)
+- Miner config: `/etc/meowdeploy/miner.json` (mode `0600`, full install only)
+- State: `/var/lib/meowdeploy/state.json`
+- Units: `/etc/systemd/system/meowdeploy-agent.service` and
+  `meowdeploy-miner.service`
+
+## Verification
+
+```bash
+systemctl is-active meowdeploy-agent.service meowdeploy-miner.service tor
+systemctl show meowdeploy-miner.service -p CPUQuotaPerSecUSec -p ActiveState
+journalctl -u meowdeploy-agent.service -n 50 --no-pager
+```
+
+The agent's CPU quota is calculated from the host's actual CPU count. A 30% cap on an
+8-core host is `CPUQuota=240%`; on a 20-core host it is `CPUQuota=600%`.
