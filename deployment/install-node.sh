@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
+INSTALLER_VERSION="2026.11.06.2"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
@@ -38,6 +39,7 @@ Options:
   --pool HOST:PORT       Miner pool (default: MoneroOcean)
   --wallet ADDRESS       Miner wallet (default: the project test wallet)
   --miner-version VER    XMRig release (default: 6.26.0)
+  --version, -V          Print the installer version and exit
   --help, -h             Show this help
 
 Examples:
@@ -48,6 +50,38 @@ Examples:
   install-node.sh --controller http://abc.onion:18765 --token 'long-secret' \
     --agent-only --yes
 EOF
+}
+
+validate_controller_url() {
+  local url=$1 scheme authority host port
+  if [[ ! $url =~ ^(https?)://([^/]+)/?$ ]]; then
+    echo 'Controller URL must be http://HOST:PORT (for example http://abc.onion:18765).' >&2
+    return 2
+  fi
+  scheme=${BASH_REMATCH[1]}
+  authority=${BASH_REMATCH[2]}
+  if [[ $authority == *@* ]]; then
+    echo 'Controller URL must not contain credentials.' >&2
+    return 2
+  fi
+  if [[ ! $authority =~ ^([A-Za-z0-9][A-Za-z0-9.-]*):([0-9]+)$ ]]; then
+    echo 'Controller URL must include an explicit numeric port, for example http://abc.onion:18765.' >&2
+    return 2
+  fi
+  host=${BASH_REMATCH[1]}
+  port=${BASH_REMATCH[2]}
+  if (( ${#port} > 5 )) || (( 10#$port < 1 || 10#$port > 65535 )); then
+    echo "Controller port must be between 1 and 65535 (got ${port})." >&2
+    return 2
+  fi
+  if [[ $scheme != http && $scheme != https ]]; then
+    echo 'Controller URL must use http:// or https://.' >&2
+    return 2
+  fi
+  if [[ $host != *.onion && $host != localhost && $host != 127.0.0.1 ]]; then
+    echo "Warning: controller host '$host' is not a .onion address; use it only for local testing." >&2
+  fi
+  return 0
 }
 
 while (($#)); do
@@ -62,15 +96,13 @@ while (($#)); do
     --pool) POOL=${2:?}; shift 2 ;;
     --wallet) WALLET=${2:?}; shift 2 ;;
     --miner-version) VER=${2:?}; shift 2 ;;
+    --version|-V) echo "MeowDeploy node installer $INSTALLER_VERSION"; exit 0 ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-[[ $CONTROLLER =~ ^https?://[A-Za-z0-9.-]+\.onion(:[0-9]+)?/?$ ]] || {
-  echo 'Controller URL must be an onion URL with a port, for example http://abc.onion:18765.' >&2
-  exit 2
-}
+validate_controller_url "$CONTROLLER" || exit 2
 [[ -n $TOKEN && ${#TOKEN} -ge 8 && ${#TOKEN} -le 256 ]] || {
   echo 'Supply a token of 8-256 characters.' >&2
   exit 2
@@ -95,6 +127,7 @@ mode='agent+miner'
 if (( DRY_RUN )); then
   cat <<EOF
 MeowDeploy dry run (no changes will be made)
+  Installer:   $INSTALLER_VERSION
   Host:        $(hostname -f 2>/dev/null || hostname)
   Agent ID:    $AGENT_ID
   Controller:  $CONTROLLER
@@ -118,6 +151,7 @@ command -v apt-get >/dev/null || { echo 'Debian/Ubuntu apt is required.' >&2; ex
 if (( ! ASSUME_YES )); then
   cat <<EOF
 MeowDeploy host setup
+  Installer:   $INSTALLER_VERSION
   Host:        $(hostname -f 2>/dev/null || hostname)
   Agent ID:    $AGENT_ID
   Controller:  $CONTROLLER
@@ -145,6 +179,9 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
 apt-get install -y -qq tor python3 python3-venv curl ca-certificates tar gzip jq iproute2 >/dev/null
+for command_name in curl jq ss systemctl systemd-analyze python3; do
+  command -v "$command_name" >/dev/null || { echo "Required command is missing: $command_name" >&2; exit 1; }
+done
 install -d -m 750 "$BASE" "$CONF" "$STATE"
 # The agent writes this drop-in while ProtectSystem=full keeps /etc read-only.
 install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
@@ -153,8 +190,21 @@ install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
 touch /etc/tor/torrc
 grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\.0\.0\.1:' /etc/tor/torrc || \
   printf '\n# MeowDeploy local outbound proxy\nSocksPort 127.0.0.1:9050\n' >> /etc/tor/torrc
-systemctl enable tor >/dev/null 2>&1
-systemctl restart tor >/dev/null 2>&1
+systemctl enable tor >/dev/null 2>&1 || true
+systemctl restart tor || { echo 'Failed to restart the Tor service.' >&2; exit 1; }
+
+tor_listening() {
+  ss -ltn 2>/dev/null | grep -Eq '127\.0\.0\.1:9050([[:space:]]|$)'
+}
+for _ in $(seq 1 60); do
+  tor_listening && break
+  sleep 1
+done
+if ! tor_listening; then
+  echo 'Tor SOCKS listener 127.0.0.1:9050 is not listening. Check /etc/tor/torrc and journalctl -u tor.' >&2
+  systemctl status tor --no-pager -l >&2 || true
+  exit 1
+fi
 
 if [[ $AGENT_ONLY -eq 0 ]]; then
   # Retry metadata and archive downloads, verify the official release digest each time.
@@ -251,16 +301,41 @@ EOF
 fi
 
 SOURCE=${MEOWDEPLOY_SOURCE:-https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp}
-curl -fsSL "$SOURCE/agent/meowdeploy_agent.py" -o "$BASE/meowdeploy_agent.py.new"
-curl -fsSL "$SOURCE/agent/requirements.txt" -o "$BASE/requirements.txt.new"
-curl -fsSL "$SOURCE/agent/meowdeploy-agent.service" -o /etc/systemd/system/meowdeploy-agent.service.new
+raw_url() {
+  printf '%s/%s?v=%s' "${SOURCE%/}" "$1" "$INSTALLER_VERSION"
+}
+require_file() {
+  [[ -f $1 ]] || { echo "Missing required file: $1" >&2; exit 1; }
+}
+
+curl -fsSL --retry 3 --connect-timeout 15 -H 'Cache-Control: no-cache' \
+  "$(raw_url agent/meowdeploy_agent.py)" -o "$BASE/meowdeploy_agent.py.new"
+curl -fsSL --retry 3 --connect-timeout 15 -H 'Cache-Control: no-cache' \
+  "$(raw_url agent/requirements.txt)" -o "$BASE/requirements.txt.new"
+curl -fsSL --retry 3 --connect-timeout 15 -H 'Cache-Control: no-cache' \
+  "$(raw_url agent/meowdeploy-agent.service)" -o /etc/systemd/system/meowdeploy-agent.service.new
+for downloaded in "$BASE/meowdeploy_agent.py.new" "$BASE/requirements.txt.new" /etc/systemd/system/meowdeploy-agent.service.new; do
+  [[ -s $downloaded ]] || { echo "Downloaded file is empty: $downloaded" >&2; exit 1; }
+done
 install -m 755 "$BASE/meowdeploy_agent.py.new" "$BASE/meowdeploy_agent.py"
 install -m 644 "$BASE/requirements.txt.new" "$BASE/requirements.txt"
 install -m 644 /etc/systemd/system/meowdeploy-agent.service.new /etc/systemd/system/meowdeploy-agent.service
 rm -f "$BASE/meowdeploy_agent.py.new" "$BASE/requirements.txt.new" /etc/systemd/system/meowdeploy-agent.service.new
 
+require_file "$BASE/meowdeploy_agent.py"
+require_file "$BASE/requirements.txt"
+require_file /etc/systemd/system/meowdeploy-agent.service
+
 python3 -m venv "$BASE/venv"
+[[ -x $BASE/venv/bin/python3 ]] || {
+  echo "Python venv is missing its interpreter: $BASE/venv/bin/python3" >&2
+  exit 1
+}
 "$BASE/venv/bin/pip" install -q -r "$BASE/requirements.txt"
+"$BASE/venv/bin/python3" "$BASE/meowdeploy_agent.py" --version >/dev/null || {
+  echo 'The installed agent cannot run with the new venv.' >&2
+  exit 1
+}
 
 jq -n \
   --arg controller "$CONTROLLER" \
@@ -274,45 +349,96 @@ jq -n \
   > "$CONF/agent.json.tmp"
 chmod 600 "$CONF/agent.json.tmp"
 mv "$CONF/agent.json.tmp" "$CONF/agent.json"
+require_file "$CONF/agent.json"
+TOKEN_CHECK="$TOKEN" jq -e \
+  --arg controller "$CONTROLLER" \
+  --arg agent_id "$AGENT_ID" \
+  '.controller == $controller and .agent_id == $agent_id and .token == env.TOKEN_CHECK and .socks_port == 9050 and .poll_seconds == 30' \
+  "$CONF/agent.json" >/dev/null || {
+    echo "Agent config verification failed: $CONF/agent.json" >&2
+    exit 1
+  }
+config_mode=$(stat -c '%a' "$CONF/agent.json" 2>/dev/null || true)
+[[ $config_mode == 600 ]] || {
+  echo "Agent config must have mode 0600 (found ${config_mode:-unknown}): $CONF/agent.json" >&2
+  exit 1
+}
 
-# Remove the old drop-in from earlier installers; it contained the token on the
-# process command line and override the new config-driven ExecStart.
-rm -f /etc/systemd/system/meowdeploy-agent.service.d/10-config.conf
-rmdir /etc/systemd/system/meowdeploy-agent.service.d 2>/dev/null || true
+# Older installers used an agent drop-in that put --controller/--token on the
+# ExecStart command line. Remove every stale ExecStart override, not just the
+# known 10-config.conf path, before reloading systemd.
+remove_agent_execstart_dropins() {
+  local dir=/etc/systemd/system/meowdeploy-agent.service.d file
+  [[ -d $dir ]] || return 0
+  for file in "$dir"/*.conf; do
+    [[ -e $file ]] || continue
+    if grep -Eq '^[[:space:]]*ExecStart[[:space:]]*=' "$file"; then
+      echo "Removing stale agent drop-in: $file" >&2
+      rm -f -- "$file"
+    fi
+  done
+  rm -f -- "$dir/10-config.conf"
+  rmdir "$dir" 2>/dev/null || true
+}
+remove_agent_execstart_dropins
 
-systemd-analyze verify /etc/systemd/system/meowdeploy-agent.service
+systemd-analyze verify /etc/systemd/system/meowdeploy-agent.service || {
+  echo 'Agent systemd unit failed validation.' >&2
+  exit 1
+}
 systemctl daemon-reload
-if [[ $AGENT_ONLY -eq 0 ]]; then
-  systemctl enable --now meowdeploy-miner.service >/dev/null || true
-fi
-systemctl enable --now meowdeploy-agent.service >/dev/null || true
 
 failed=0
+if [[ $AGENT_ONLY -eq 0 ]]; then
+  if ! systemctl enable --now meowdeploy-miner.service >/dev/null 2>&1; then
+    echo 'Miner service could not be enabled/started. Diagnostics:' >&2
+    systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
+    journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
+    failed=1
+  fi
+fi
+if ! systemctl enable --now meowdeploy-agent.service >/dev/null 2>&1; then
+  echo 'Agent service could not be enabled/started. Diagnostics:' >&2
+  systemctl status meowdeploy-agent.service --no-pager -l >&2 || true
+  journalctl -u meowdeploy-agent.service -n 30 --no-pager >&2 || true
+  failed=1
+fi
 if [[ $AGENT_ONLY -eq 0 ]] && ! systemctl is-active --quiet meowdeploy-miner.service; then
-  echo 'Miner service failed to start. Diagnostics:' >&2
+  echo 'Miner service is not active. Diagnostics:' >&2
   systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
   journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
   failed=1
 fi
 if ! systemctl is-active --quiet meowdeploy-agent.service; then
-  echo 'Agent service failed to start. Diagnostics:' >&2
+  echo 'Agent service is not active. Diagnostics:' >&2
   systemctl status meowdeploy-agent.service --no-pager -l >&2 || true
   journalctl -u meowdeploy-agent.service -n 30 --no-pager >&2 || true
   failed=1
 fi
-((failed == 0)) || exit 1
-
-tor_listening() {
-  local listen
-  listen=$(ss -ltn 2>/dev/null || true)
-  grep -q '127.0.0.1:9050' <<< "$listen"
-}
-for _ in $(seq 1 15); do
-  tor_listening && break
-  sleep 1
-done
-if ! tor_listening; then
-  echo 'Warning: Tor SOCKS listener 127.0.0.1:9050 is not listening yet.' >&2
+if ! systemctl is-enabled --quiet meowdeploy-agent.service; then
+  echo 'Agent service is not enabled for startup.' >&2
+  failed=1
 fi
 
-echo "MeowDeploy installed: ${mode} active; agent id ${AGENT_ID}; CPU cap ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%); configuration verified."
+expected_exec="$BASE/venv/bin/python3 $BASE/meowdeploy_agent.py --config $CONF/agent.json"
+effective_exec=$(systemctl show meowdeploy-agent.service -p ExecStart --value 2>/dev/null || true)
+if [[ $effective_exec != *"$expected_exec"* ]]; then
+  echo 'Agent service is not using the expected config-file ExecStart.' >&2
+  echo "Expected to find: $expected_exec" >&2
+  echo "Effective ExecStart: ${effective_exec:-<empty>}" >&2
+  echo 'Check /etc/systemd/system/meowdeploy-agent.service and its drop-ins.' >&2
+  failed=1
+fi
+if [[ -d /etc/systemd/system/meowdeploy-agent.service.d ]] && \
+   grep -rEq '^[[:space:]]*ExecStart[[:space:]]*=' /etc/systemd/system/meowdeploy-agent.service.d --include='*.conf'; then
+  echo 'An agent drop-in still overrides ExecStart.' >&2
+  failed=1
+fi
+((failed == 0)) || exit 1
+
+if ! tor_listening; then
+  echo 'Tor SOCKS listener 127.0.0.1:9050 disappeared during installation.' >&2
+  exit 1
+fi
+
+echo "MeowDeploy installed: ${mode} active; installer ${INSTALLER_VERSION}; agent id ${AGENT_ID}; CPU cap ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%); config, ExecStart, Tor, and services verified."

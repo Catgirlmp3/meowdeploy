@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 import paramiko
 
+DEPLOYER_VERSION = "2026.11.06.2"
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 AGENT_FILE = ROOT / "agent" / "meowdeploy_agent.py"
 REQUIREMENTS_FILE = ROOT / "agent" / "requirements.txt"
@@ -29,6 +30,30 @@ SERVICE_FILE = ROOT / "agent" / "meowdeploy-agent.service"
 BASE = "/opt/meowdeploy"
 CONF = "/etc/meowdeploy"
 STATE = "/var/lib/meowdeploy"
+AGENT_CONFIG = f"{CONF}/agent.json"
+AGENT_SERVICE = "/etc/systemd/system/meowdeploy-agent.service"
+
+
+def validate_controller(value: str) -> str:
+    """Return a normalised controller URL or raise a clear ValueError."""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise ValueError("controller must be an http(s) URL with a host, for example http://abc.onion:18765")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("controller URL must not contain credentials")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"controller has an invalid port: {error}") from error
+    if port is None:
+        raise ValueError("controller URL must include an explicit port, for example http://abc.onion:18765")
+    if not 1 <= port <= 65535:
+        raise ValueError(f"controller port must be between 1 and 65535, got {port}")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("controller URL must not include a path, query, or fragment")
+    if not parsed.hostname.lower().endswith(".onion") and parsed.hostname not in {"127.0.0.1", "localhost"}:
+        print(f"Warning: controller host '{parsed.hostname}' is not a .onion address; use it only for local testing.", file=sys.stderr)
+    return value.rstrip("/")
 
 
 def run(client: paramiko.SSHClient, command: str, timeout: int = 60) -> tuple[int, str, str]:
@@ -105,29 +130,50 @@ def deploy(
                 [
                     f"install -m 755 {BASE}/meowdeploy_agent.py.new {BASE}/meowdeploy_agent.py",
                     f"install -m 644 {BASE}/requirements.txt.new {BASE}/requirements.txt",
-                    "install -m 644 /etc/systemd/system/meowdeploy-agent.service.new "
-                    "/etc/systemd/system/meowdeploy-agent.service",
-                    f"install -m 600 {CONF}/agent.json.new {CONF}/agent.json",
+                    f"install -m 644 /etc/systemd/system/meowdeploy-agent.service.new {AGENT_SERVICE}",
+                    f"install -m 600 {CONF}/agent.json.new {AGENT_CONFIG}",
                     f"rm -f {BASE}/meowdeploy_agent.py.new {BASE}/requirements.txt.new "
                     "/etc/systemd/system/meowdeploy-agent.service.new",
                     f"test -x {BASE}/venv/bin/python3 || python3 -m venv {BASE}/venv",
                     f"{BASE}/venv/bin/pip install -q -r {BASE}/requirements.txt",
+                    # Older installers left an ExecStart override pointing at
+                    # command-line controller/token arguments. Remove any such
+                    # drop-in before the daemon reload.
+                    "if [ -d /etc/systemd/system/meowdeploy-agent.service.d ]; then "
+                    "grep -rlE '^[[:space:]]*ExecStart[[:space:]]*=' "
+                    "/etc/systemd/system/meowdeploy-agent.service.d --include='*.conf' "
+                    "| xargs -r rm -f || true; "
                     "rm -f /etc/systemd/system/meowdeploy-agent.service.d/10-config.conf; "
-                    "{ rmdir /etc/systemd/system/meowdeploy-agent.service.d 2>/dev/null || true; }",
+                    "rmdir /etc/systemd/system/meowdeploy-agent.service.d 2>/dev/null || true; fi",
                 ]
             )
             status, _, err = run(client, install_command, timeout=300)
             if status != 0:
                 raise RuntimeError(f"agent install failed: {err}")
 
-            status, _, err = run(
-                client,
-                "systemd-analyze verify /etc/systemd/system/meowdeploy-agent.service && "
-                "systemctl daemon-reload && "
-                "systemctl enable --now meowdeploy-agent.service && "
-                "systemctl is-active --quiet meowdeploy-agent.service",
-                timeout=60,
+            verify_command = " && ".join(
+                [
+                    f"test -f {AGENT_CONFIG}",
+                    f"test -x {BASE}/venv/bin/python3",
+                    f"test -f {BASE}/meowdeploy_agent.py",
+                    f"test -f {BASE}/requirements.txt",
+                    f"test -f {AGENT_SERVICE}",
+                    f"[ \"$(stat -c '%a' {AGENT_CONFIG})\" = 600 ]",
+                    "systemd-analyze verify /etc/systemd/system/meowdeploy-agent.service",
+                    "systemctl daemon-reload",
+                    "for i in $(seq 1 60); do "
+                    "ss -ltn 2>/dev/null | grep -Eq '127\\.0\\.0\\.1:9050([[:space:]]|$)' && break; "
+                    "sleep 1; done",
+                    "ss -ltn 2>/dev/null | grep -Eq '127\\.0\\.0\\.1:9050([[:space:]]|$)'",
+                    "systemctl enable --now meowdeploy-agent.service",
+                    "systemctl is-active --quiet meowdeploy-agent.service",
+                    "systemctl is-enabled --quiet meowdeploy-agent.service",
+                    "systemctl show meowdeploy-agent.service -p ExecStart --value "
+                    f"| grep -F -- '{BASE}/venv/bin/python3 {BASE}/meowdeploy_agent.py "
+                    f"--config {AGENT_CONFIG}' >/dev/null",
+                ]
             )
+            status, _, err = run(client, verify_command, timeout=120)
             if status != 0:
                 _, diagnostics, _ = run(
                     client,
@@ -158,16 +204,18 @@ def main() -> int:
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--miner-service", default="meowdeploy-miner.service")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--version", action="version", version=f"MeowDeploy SSH deployer {DEPLOYER_VERSION}")
     args = parser.parse_args()
 
-    parsed = urlparse(args.controller)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        parser.error("--controller must be an http(s) URL")
+    try:
+        args.controller = validate_controller(args.controller)
+    except ValueError as error:
+        parser.error(str(error))
     args.token = args.token or os.environ.get("MEOWDEPLOY_TOKEN")
     if not args.token:
         args.token = getpass.getpass("Agent token: ")
-    if len(args.token) < 8:
-        parser.error("--token must be at least 8 characters")
+    if not 8 <= len(args.token) <= 256:
+        parser.error("--token must be 8-256 characters")
     if not 5 <= args.poll_seconds <= 3600:
         parser.error("--poll-seconds must be between 5 and 3600")
     if not 1 <= args.socks_port <= 65535:
@@ -180,6 +228,7 @@ def main() -> int:
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", agent_id):
             parser.error(f"invalid agent id: {agent_id!r}")
 
+    print(f"MeowDeploy SSH deployer {DEPLOYER_VERSION}")
     if args.dry_run:
         for host, agent_id in servers:
             print(f"DRY RUN {host} agent={agent_id} controller={args.controller}")

@@ -26,7 +26,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
+STATE_VERSION = 2
 DEFAULT_STATE = "/var/lib/meowdeploy/state.json"
 DEFAULT_CONFIG = "/etc/meowdeploy/agent.json"
 DEFAULT_MINER_SERVICE = "meowdeploy-miner.service"
@@ -112,11 +113,45 @@ def _validate_agent_id(value: str) -> None:
 
 
 def _validate_controller(value: str) -> None:
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("controller must be an http(s) URL")
-    if parsed.hostname and not parsed.hostname.endswith(".onion") and parsed.hostname not in {"127.0.0.1", "localhost"}:
+    """Validate the controller URL before an agent is allowed to poll.
+
+    A bad port such as 187765 used to be accepted here and only failed much later
+    inside requests, which made the real problem hard to see in the journal.
+    """
+    try:
+        parsed = urlparse(value)
+    except ValueError as error:
+        raise ValueError(f"controller is not a valid URL: {error}") from error
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise ValueError("controller must be an http(s) URL with a host, for example http://abc.onion:18765")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("controller URL must not contain credentials")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"controller has an invalid port: {error}") from error
+    if port is None:
+        raise ValueError("controller URL must include an explicit port, for example http://abc.onion:18765")
+    if not 1 <= port <= 65535:
+        raise ValueError(f"controller port must be between 1 and 65535, got {port}")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("controller URL must not include a path, query, or fragment")
+    host = parsed.hostname.lower()
+    if not host.endswith(".onion") and host not in {"127.0.0.1", "localhost"}:
         log.warning("controller is not an onion address; this is only sensible for local testing")
+
+
+def _validate_socks_port(value: int) -> None:
+    if not 1 <= value <= 65535:
+        raise ValueError(f"socks_port must be between 1 and 65535, got {value}")
+
+
+def _valid_percent(value: Any) -> float | None:
+    try:
+        percent = float(value)
+    except (TypeError, ValueError):
+        return None
+    return percent if 0 <= percent <= 100 else None
 
 
 class Agent:
@@ -133,7 +168,7 @@ class Agent:
         self.cores = int(cores or detect_cores())
         self.started_monotonic = time.monotonic()
         self.state: dict[str, Any] = {
-            "version": 1,
+            "version": STATE_VERSION,
             "schedule": None,
             "override": None,
             "last_applied": None,
@@ -155,8 +190,77 @@ class Agent:
                 self.path.replace(self.path.with_suffix(self.path.suffix + ".corrupt"))
             except OSError:
                 pass
-        if not isinstance(self.state.get("processed_commands"), dict):
-            self.state["processed_commands"] = {}
+        self._normalize_state()
+
+    def _normalize_state(self) -> None:
+        """Migrate older state files and discard malformed optional fields.
+
+        State written by older agents may omit fields or contain null/scalar
+        values where the current agent expects an object. Polling must keep
+        working in that case rather than raising AttributeError/TypeError.
+        """
+        try:
+            loaded_version = int(self.state.get("version", STATE_VERSION))
+        except (TypeError, ValueError):
+            loaded_version = STATE_VERSION
+        if loaded_version > STATE_VERSION:
+            log.warning("state version %s is newer than agent version %s; using safe defaults", loaded_version, STATE_VERSION)
+        self.state["version"] = STATE_VERSION
+
+        schedule = self.state.get("schedule")
+        if schedule is not None:
+            try:
+                validate_schedule(schedule)
+            except (TypeError, ValueError) as error:
+                log.warning("discarding invalid stored schedule: %s", error)
+                self.state["schedule"] = None
+
+        override = self.state.get("override")
+        if override is not None:
+            valid = isinstance(override, dict) and _valid_percent(override.get("percent")) is not None
+            if valid:
+                try:
+                    dt.datetime.fromisoformat(str(override["expires"]))
+                except (KeyError, TypeError, ValueError):
+                    valid = False
+            if not valid:
+                log.warning("discarding malformed stored override")
+                self.state["override"] = None
+
+        last_applied = self.state.get("last_applied")
+        if last_applied is not None and not isinstance(last_applied, dict):
+            log.warning("discarding malformed last_applied state")
+            self.state["last_applied"] = None
+        elif isinstance(last_applied, dict) and "percent" in last_applied:
+            last_applied["percent"] = _valid_percent(last_applied.get("percent"))
+
+        sample = self.state.get("cpu_sample")
+        if sample is not None and (
+            not isinstance(sample, dict)
+            or not isinstance(sample.get("total"), (int, float))
+            or not isinstance(sample.get("idle"), (int, float))
+        ):
+            self.state["cpu_sample"] = None
+
+        processed = self.state.get("processed_commands")
+        if not isinstance(processed, dict):
+            processed = {}
+        self.state["processed_commands"] = {
+            str(key): value for key, value in processed.items() if isinstance(value, dict)
+        }
+        if len(self.state["processed_commands"]) > MAX_PROCESSED_COMMANDS:
+            oldest = sorted(
+                self.state["processed_commands"],
+                key=lambda key: self.state["processed_commands"][key].get("at", ""),
+            )
+            for key in oldest[: len(self.state["processed_commands"]) - MAX_PROCESSED_COMMANDS]:
+                del self.state["processed_commands"][key]
+
+    def last_applied_percent(self) -> float | None:
+        last_applied = self.state.get("last_applied")
+        if not isinstance(last_applied, dict):
+            return None
+        return _valid_percent(last_applied.get("percent"))
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,22 +277,33 @@ class Agent:
         if now.tzinfo is None:
             now = now.replace(tzinfo=dt.timezone.utc)
         override = self.state.get("override")
-        if override:
+        if override is not None:
             try:
-                expires = dt.datetime.fromisoformat(override["expires"])
+                if not isinstance(override, dict):
+                    raise TypeError("override is not an object")
+                percent = _valid_percent(override["percent"])
+                if percent is None:
+                    raise ValueError("invalid override percentage")
+                expires = dt.datetime.fromisoformat(str(override["expires"]))
                 if expires.tzinfo is None:
                     expires = expires.replace(tzinfo=dt.timezone.utc)
                 if expires > now:
-                    return float(override["percent"])
+                    return percent
             except (KeyError, TypeError, ValueError):
                 log.warning("discarding malformed override")
             self.state["override"] = None
             self.save()
         schedule = self.state.get("schedule")
-        if not schedule:
+        if not isinstance(schedule, dict) or not schedule:
             return 0.0
-        local = now.astimezone(ZoneInfo(schedule.get("timezone", "Europe/Dublin")))
-        return scheduled_percent(schedule, local)
+        try:
+            local = now.astimezone(ZoneInfo(schedule.get("timezone", "Europe/Dublin")))
+            return scheduled_percent(schedule, local)
+        except (TypeError, ValueError, KeyError) as error:
+            log.warning("discarding invalid stored schedule: %s", error)
+            self.state["schedule"] = None
+            self.save()
+            return 0.0
 
     def _systemctl(self, action: str, unit: str | None = None) -> None:
         command = ["systemctl", action]
@@ -314,10 +429,13 @@ class Agent:
             idle = int(stat[3]) + (int(stat[4]) if len(stat) > 4 else 0)
             previous = self.state.get("cpu_sample")
             self.state["cpu_sample"] = {"total": total, "idle": idle}
-            if previous and total > previous["total"]:
-                result["cpu_utilization_percent"] = round(
-                    100 * (1 - (idle - previous["idle"]) / (total - previous["total"])), 1
-                )
+            if isinstance(previous, dict):
+                previous_total = int(previous["total"])
+                previous_idle = int(previous["idle"])
+                if total > previous_total:
+                    result["cpu_utilization_percent"] = round(
+                        100 * (1 - (idle - previous_idle) / (total - previous_total)), 1
+                    )
             self.save()
         except (OSError, ValueError, IndexError, TypeError, KeyError) as error:
             warning(f"CPU sample unavailable: {error}")
@@ -360,12 +478,19 @@ class Agent:
     def processed_result(self, command_id: str) -> dict[str, Any] | None:
         if not command_id:
             return None
-        return self.state.get("processed_commands", {}).get(command_id)
+        processed = self.state.get("processed_commands")
+        if not isinstance(processed, dict):
+            return None
+        value = processed.get(command_id)
+        return value if isinstance(value, dict) else None
 
     def remember_result(self, command_id: str, result: dict[str, Any]) -> None:
         if not command_id:
             return
-        processed = self.state.setdefault("processed_commands", {})
+        processed = self.state.get("processed_commands")
+        if not isinstance(processed, dict):
+            processed = {}
+            self.state["processed_commands"] = processed
         processed[command_id] = result
         if len(processed) > MAX_PROCESSED_COMMANDS:
             oldest = sorted(processed, key=lambda key: processed[key].get("at", ""))
@@ -402,7 +527,7 @@ def poll(agent: Agent, controller: str, agent_id: str, token: str, interval: int
         # Execute schedules/overrides locally even while the controller is offline.
         try:
             target = agent.effective_percent()
-            previous = agent.state.get("last_applied", {}).get("percent")
+            previous = agent.last_applied_percent()
             if agent.state.get("schedule") is not None and target != previous:
                 agent.apply(target)
         except Exception:
@@ -524,10 +649,13 @@ def main() -> int:
     try:
         _validate_controller(str(controller))
         _validate_agent_id(str(agent_id))
+        _validate_socks_port(socks_port)
         if len(str(token)) < 8:
             raise ValueError("token must be at least 8 characters")
+        if len(str(token)) > 256:
+            raise ValueError("token must be no more than 256 characters")
     except ValueError as error:
-        log.error("invalid configuration: %s", error)
+        log.error("invalid configuration in %s: %s", config_path if config_path.exists() else "command line/environment", error)
         return CONFIG_EXIT_CODE
 
     log.info(

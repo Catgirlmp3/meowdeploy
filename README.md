@@ -56,10 +56,21 @@ curl -fsSL https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet
   --cpu-percent 30
 ```
 
-The installer prints the host, agent id, controller, CPU quota, pool, and wallet before
-changing anything and requires you to type `install`. For a reviewed, unattended
-deployment, add `--yes` after verifying those values. To print the resolved plan
-without touching the host, add `--dry-run`.
+The installer prints its version, the host, agent id, controller, CPU quota, pool, and
+wallet before changing anything and requires you to type `install`. For a reviewed,
+unattended deployment, add `--yes` after verifying those values. To print the resolved
+plan without touching the host, add `--dry-run`. The bootstrap also prints the version
+of the installer it downloaded and refuses to run an older copy that does not support
+`--agent-only`/`--yes`.
+
+Use the same token on the controller and every agent, and keep the controller URL on
+port `18765`:
+
+```text
+http://YOUR_CONTROLLER_ONION.onion:18765
+```
+
+The controller identifies an agent by its configured `agent_id`, not by its IP address.
 
 Agent-only mode installs Tor and the agent but no miner, huge pages, or MSR tuning:
 
@@ -87,10 +98,31 @@ The installer writes:
 
 ```bash
 systemctl status meowdeploy-agent.service meowdeploy-miner.service tor --no-pager
+systemctl show meowdeploy-agent.service -p ExecStart
 systemctl show meowdeploy-miner.service -p CPUQuotaPerSecUSec -p ActiveState
-ss -ltnp | grep 9050
+ss -ltn | grep 9050
 journalctl -u meowdeploy-agent.service -n 50 --no-pager
 ```
+
+The expected agent command reads the root-only config file:
+
+```text
+/opt/meowdeploy/venv/bin/python3 /opt/meowdeploy/meowdeploy_agent.py --config /etc/meowdeploy/agent.json
+```
+
+Check the config exists without printing the token:
+
+```bash
+sudo test -f /etc/meowdeploy/agent.json && echo present
+sudo stat -c '%a %U:%G %n' /etc/meowdeploy/agent.json
+sudo jq '{controller,agent_id,socks_port,poll_seconds,token_length:(.token|length)}' \
+  /etc/meowdeploy/agent.json
+```
+
+The installer removes stale agent drop-ins that override `ExecStart`, verifies the
+config mode, venv Python, Tor SOCKS listener, effective `ExecStart`, enabled state, and
+active service before it prints success. If any check fails it prints diagnostics and
+exits non-zero. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 The agent does not print its status to the shell in normal service operation. Use
 `journalctl` for errors and the controller's diagnostics panel for current health.
@@ -104,8 +136,8 @@ the miner.
 
 ```text
 deployment/servers.txt
-  172.16.3.3 vm-03
-  172.16.3.4 vm-04
+  node1.example.net vm-03
+  node2.example.net vm-04
 ```
 
 ```powershell
@@ -118,6 +150,9 @@ python deployment\deploy.py `
 
 The deployer uses `~/.ssh/known_hosts` and does not auto-add unknown host keys. The
 root password is held in memory for the session only. It caps concurrency at five.
+The SSH address is only used for deployment; the controller identifies the agent by the
+configured `agent_id` from the server list. It validates the controller URL and explicit
+port before connecting.
 
 ## Configuration
 
@@ -195,5 +230,7 @@ python -m py_compile agent\meowdeploy_agent.py deployment\deploy.py
 ```
 
 The Python tests cover schedule validation, overrides, per-core quota math, command
-deduplication, and the stop-miner regression where a stop used to be followed by an
-unconditional restart.
+deduplication, the stop-miner regression where a stop used to be followed by an
+unconditional restart, old/null agent state migration, controller URL and port
+validation, installer argument parsing, stale `ExecStart` drop-in cleanup, and
+service/config consistency.
