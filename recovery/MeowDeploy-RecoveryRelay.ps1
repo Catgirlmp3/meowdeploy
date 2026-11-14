@@ -9,7 +9,7 @@ function Wake($mac){$m=$mac -replace "[^0-9A-Fa-f]","";if($m.Length -ne 12){thro
 function Reachable($h){return Test-Connection -ComputerName $h.address -Count 1 -Quiet -ErrorAction SilentlyContinue}
 function Ssh($h,$cmd){$exe=(Get-Command ssh.exe -ErrorAction Stop).Source;$target="$($h.sshUser)@$($h.address)";$args=@("-p",[string]$h.sshPort,"-o","BatchMode=yes","-o","ConnectTimeout=8","-o","StrictHostKeyChecking=yes",$target,$cmd);$p=Start-Process -FilePath $exe -ArgumentList $args -NoNewWindow -Wait -PassThru;if($p.ExitCode -ne 0){throw "SSH failed (exit $($p.ExitCode)); verify known_hosts, keys and sudo permissions"}}
 $cfg=Load-Config
-if($Action -eq "list"){foreach($h in $cfg.hosts){[pscustomobject]@{Id=$h.id;Name=$h.name;IP=$h.address;Enabled=$h.enabled;Reachable=(if($h.enabled){Reachable $h}else{$false});Role=$h.role}};exit}
+if($Action -eq "list"){foreach($h in $cfg.hosts){$up=$false;if($h.enabled){$up=Reachable $h};[pscustomobject]@{Id=$h.id;Name=$h.name;IP=$h.address;Enabled=$h.enabled;Reachable=$up;Role=$h.role}};exit}
 if($Action -eq "watch"){Write-Warning "Probe/WOL only. No automatic reboot or service restart. ICMP failure is not proof of power-off.";while($true){foreach($h in $cfg.hosts|Where-Object enabled){if(!(Reachable $h) -and $cfg.autoWake -eq $true -and $h.mac){Wake ([string]$h.mac);Audit $cfg $h.id "wake-auto" "packet sent; boot unverified";Write-Host "WOL sent: $($h.id)"}};Start-Sleep -Seconds ([Math]::Max(10,[int]$cfg.pollSeconds))}}
 $h=Get-Target $cfg $HostId
 try { switch($Action){
