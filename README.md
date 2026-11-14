@@ -241,3 +241,17 @@ deduplication, the stop-miner regression where a stop used to be followed by an
 unconditional restart, old/null agent state migration, controller URL and port
 validation, installer argument parsing, stale `ExecStart` drop-in cleanup, and
 service/config consistency.
+
+
+### Wake-on-LAN setup
+
+On a physical Linux/Proxmox host, run the interactive WOL helper:
+
+```bash
+sudo bash deployment/configure-wol.sh
+```
+
+It prompts before changing NIC WOL and, only if Dell Command | Configure is
+already present, separately prompts before changing the Dell BIOS WOL setting.
+See [the WOL and recovery guide](docs/WINDOWS_RECOVERY_RELAY.md) for limitations
+and the physical shutdown test. This helper does not remotely configure the fleet.
