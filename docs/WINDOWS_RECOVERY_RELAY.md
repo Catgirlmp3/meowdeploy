@@ -59,3 +59,31 @@ The script sends a broadcast magic packet to UDP port 9. A successful send only 
 8. Stop the primary controller VM and confirm the Windows relay remains usable.
 
 The relay complements the existing Tor/HMAC agent controller. It does not replace agent polling or the controller's command queue.
+
+
+## Wake-on-LAN provisioning helper
+
+MeowDeploy includes `deployment/configure-wol.sh` for an interactive, local
+WOL setup on a **physical Dell/Linux host**:
+
+```bash
+sudo bash deployment/configure-wol.sh
+```
+
+The helper identifies the machine and NIC, displays the MAC address and current
+NIC/BIOS WOL state, then prompts before enabling NIC magic-packet wake
+(`ethtool -s IFACE wol g`). If Dell Command | Configure (`cctk`) is already
+installed, it offers a separate prompt to set BIOS `WakeOnLan=LanOnly`.
+
+Important limitations:
+
+- Run it on the physical Proxmox host, not inside a guest VM.
+- It does not install `cctk`; Dell's Linux support matrix does not list Proxmox
+  VE, so do not force-install an Ubuntu/RHEL package onto PVE.
+- NIC WOL may not persist across reboot or driver reload. Persistence is not
+  configured by this helper.
+- A successful setting read-back does not prove wake-from-shutdown. Verify
+  standby NIC power and test a real shutdown/magic-packet/boot cycle.
+- The helper configures only the local machine. A future fleet orchestrator can
+  invoke it over SSH after the supported utility and persistence strategy are
+  validated. Do not run it across the farm blindly.
