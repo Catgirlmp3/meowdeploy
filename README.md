@@ -221,6 +221,10 @@ Limitations still worth knowing:
   VM before production use.
 - `deploy.py` intentionally does not install the miner; use `install-node.sh` for that.
 
+## Windows recovery relay
+
+An interactive Windows-side LAN recovery MVP is available in [`recovery/`](recovery/MeowDeploy-RecoveryRelay.ps1). It supports WOL, reachability checks, Proxmox browser launch, and fixed SSH service/reboot operations. Read [the setup and safety guide](docs/WINDOWS_RECOVERY_RELAY.md) before enabling hosts. It is not yet a Windows service or integrated dashboard component; unattended reboot/power-cycle is intentionally not enabled.
+
 ## Tests
 
 ```powershell
