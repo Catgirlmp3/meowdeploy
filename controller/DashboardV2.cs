@@ -68,13 +68,13 @@ public sealed class DashboardV2 : Form
 
         var main = new Panel { Dock = DockStyle.Fill, BackColor = bg, Padding = new Padding(16, 16, 16, 12) };
         root.Controls.Add(main, 1, 0);
-        var header = new Panel { Dock = DockStyle.Top, Height = 104, BackColor = bg };
+        var header = new Panel { Dock = DockStyle.Top, Height = 128, BackColor = bg };
         main.Controls.Add(header);
         pageTitle.Text = "Overview"; pageTitle.Font = new Font("Segoe UI", 25, FontStyle.Bold); pageTitle.ForeColor = text;
         pageTitle.AutoSize = false; pageTitle.Location = new Point(0, 0); pageTitle.Size = new Size(300, 42); header.Controls.Add(pageTitle);
         pageSubtitle.Text = "Your infrastructure, at a glance."; pageSubtitle.ForeColor = muted; pageSubtitle.AutoSize = false; pageSubtitle.Size = new Size(320, 34);
         pageSubtitle.Location = new Point(3, 48); header.Controls.Add(pageSubtitle);
-        var topActions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 42, Width = 420, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        var topActions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 42, Width = 290, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Anchor = AnchorStyles.Top | AnchorStyles.Right };
         header.Controls.Add(topActions);
         topActions.Controls.Add(TopButton("↻  Refresh", (_, _) => RefreshData()));
         topActions.Controls.Add(TopButton("+  Add machine", (_, _) => AddMachine()));
