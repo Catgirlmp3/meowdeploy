@@ -212,7 +212,7 @@ public sealed class DashboardV2 : Form
             var samples = hosts.Select(h => api.TryStatus(h, out var s) && s.TryGetProperty("effective_percent", out var v) ? (double?)v.GetDouble() : null).Where(x => x.HasValue).Select(x => x!.Value).ToList();
             cpu.Text = samples.Count == 0 ? "—" : $"{samples.Average():0}%"; sync.Text = DateTime.Now.ToString("HH:mm:ss");
             list.BeginUpdate(); list.Items.Clear();
-            foreach (var h in hosts) { var state = api.GetHostState(h); list.Items.Add($"{(state.Online ? "ONLINE " : "OFFLINE")}  {h,-28}  {api.Checkins.TryGetValue(h, out var t) ? t.ToLocalTime().ToString("g") : "Never"}"); }
+            foreach (var h in hosts) { var state = api.GetHostState(h); var seen = api.Checkins.TryGetValue(h, out var t) ? t.ToLocalTime().ToString("g") : "Never"; list.Items.Add($"{(state.Online ? "ONLINE " : "OFFLINE")}  {h,-28}  {seen}"); }
             list.EndUpdate();
         }
         panel.Tag = (Action)Update; Update(); return panel;
