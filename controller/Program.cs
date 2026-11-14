@@ -14,7 +14,7 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         using var api = new ControllerApi();
         api.Start();
-        Application.Run(new Dashboard(api));
+        Application.Run(new DashboardV2(api));
     }
 }
 
