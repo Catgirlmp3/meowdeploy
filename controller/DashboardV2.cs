@@ -669,13 +669,110 @@ public sealed class DashboardV2 : Form
 
     private Control DeploymentsPage()
     {
-        return InfoPage(
-            "AGENT DEPLOYMENT",
-            "Deploy agents using the repository's deployment tooling. Review SSH host keys and target inventory before running a rollout.",
-            "RECOMMENDED WORKFLOW",
-            "1. Verify each target's hostname and SSH fingerprint.\n2. Run deployment/deploy.py from a trusted administration machine.\n3. Confirm the agent service is enabled and healthy.\n4. Confirm the worker appears in Machines and reports telemetry.",
-            "SAFETY",
-            "Fleet commands are queued until an agent checks in. Review the inventory before issuing broad actions.");
+        var scroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = bg, Padding = new Padding(2) };
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1, RowCount = 0, Padding = new Padding(18),
+            BackColor = surface, Margin = new Padding(0, 0, 12, 0)
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        layout.Controls.Add(InfoHeading("TOR RELAY CONTROL", 13F, accent));
+        layout.Controls.Add(WrappedText("Manage the Windows Tor service used to publish this controller as an onion service. This does not modify torrc or private keys.", 9.5F, muted, 760));
+
+        var serviceLabel = MakeLabel("Detecting Tor services…", 9.5F, true, amber);
+        var onionLabel = MakeLabel("Onion address: not detected", 9F, false, muted);
+        onionLabel.MaximumSize = new Size(760, 0);
+        onionLabel.AutoSize = true;
+
+        var servicePicker = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList, Width = 360,
+            BackColor = surfaceRaised, ForeColor = foreground, FlatStyle = FlatStyle.Flat,
+            Margin = new Padding(0, 4, 0, 8)
+        };
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top, AutoSize = true, WrapContents = true,
+            FlowDirection = FlowDirection.LeftToRight, BackColor = surface,
+            Margin = new Padding(0, 4, 0, 8)
+        };
+
+        TorWindowsService[] found = Array.Empty<TorWindowsService>();
+        void RefreshTor()
+        {
+            try
+            {
+                found = TorServiceManager.FindServices();
+                servicePicker.Items.Clear();
+                foreach (var item in found) servicePicker.Items.Add(item);
+                if (found.Length > 0) servicePicker.SelectedIndex = 0;
+                serviceLabel.Text = found.Length == 0
+                    ? "No Tor Windows service found. Install/run Tor as a Windows service."
+                    : $"{found.Length} Tor service(s) detected. Select the service used by this controller.";
+                serviceLabel.ForeColor = found.Length == 0 ? amber : green;
+                onionLabel.Text = "Onion address: " + (TorServiceManager.FindOnionHostname() ?? "not found — configure HiddenServiceDir in torrc");
+            }
+            catch (Exception ex)
+            {
+                serviceLabel.Text = "Tor detection failed: " + ex.Message;
+                serviceLabel.ForeColor = red;
+            }
+        }
+
+        TorWindowsService? SelectedService() => servicePicker.SelectedItem as TorWindowsService;
+        void RunServiceAction(string action)
+        {
+            var selected = SelectedService();
+            if (selected is null) { MessageBox.Show(this, "No Tor service is selected.", "Tor", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+            if (action != "start" && MessageBox.Show(this,
+                $"Are you sure you want to {action} the Tor service '{selected.DisplayName}'? Existing onion connections will be interrupted.",
+                "Confirm Tor action", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            try
+            {
+                TorServiceManager.ControlService(selected.Name, action);
+                serviceLabel.Text = $"Requested {action} for {selected.DisplayName}. Refresh to verify its state.";
+                serviceLabel.ForeColor = amber;
+            }
+            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+            {
+                serviceLabel.Text = "Action cancelled at the Windows UAC prompt.";
+                serviceLabel.ForeColor = amber;
+            }
+            catch (Exception ex)
+            {
+                serviceLabel.Text = $"Could not {action} Tor: {ex.Message}";
+                serviceLabel.ForeColor = red;
+            }
+        }
+
+        buttons.Controls.Add(ActionButton("Start", (_, _) => RunServiceAction("start"), true));
+        buttons.Controls.Add(ActionButton("Stop", (_, _) => RunServiceAction("stop"), false));
+        buttons.Controls.Add(ActionButton("Restart", (_, _) => RunServiceAction("restart"), false));
+        buttons.Controls.Add(ActionButton("↻ Refresh Tor", (_, _) => RefreshTor(), false));
+        layout.Controls.Add(servicePicker);
+        layout.Controls.Add(serviceLabel);
+        layout.Controls.Add(buttons);
+        layout.Controls.Add(onionLabel);
+        var copy = ActionButton("Copy onion address", (_, _) =>
+        {
+            var hostname = TorServiceManager.FindOnionHostname();
+            if (!string.IsNullOrWhiteSpace(hostname)) Clipboard.SetText(hostname);
+            else MessageBox.Show(this, "No hostname file was found. Configure the onion service first.", "Tor");
+        }, false);
+        copy.Margin = new Padding(0, 4, 0, 14);
+        layout.Controls.Add(copy);
+
+        layout.Controls.Add(InfoHeading("AGENT DEPLOYMENT", 13F, accent));
+        layout.Controls.Add(WrappedText("Deploy agents using the repository's deployment tooling. Review SSH host keys and target inventory before running a rollout.", 9.5F, muted, 760));
+        layout.Controls.Add(InfoHeading("RECOMMENDED WORKFLOW", 10.5F, foreground));
+        layout.Controls.Add(WrappedText("1. Verify each target's hostname and SSH fingerprint.\n2. Run deployment/deploy.py from a trusted administration machine.\n3. Confirm the agent service is enabled and healthy.\n4. Confirm the worker appears in Machines and reports telemetry.", 9.5F, foreground, 760));
+        layout.Controls.Add(InfoHeading("SAFETY", 10.5F, foreground));
+        layout.Controls.Add(WrappedText("Fleet commands are queued until an agent checks in. Review the inventory before issuing broad actions. The controller should remain bound to 127.0.0.1; Tor provides the onion endpoint.", 9.5F, foreground, 760));
+        scroll.Controls.Add(layout);
+        RefreshTor();
+        return scroll;
     }
 
     private Control SettingsPage()
