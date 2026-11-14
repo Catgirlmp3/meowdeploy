@@ -2,7 +2,26 @@
 [CmdletBinding()]
 param([ValidateSet("list","probe","wake","open","ssh","restart-xmrig","restart-tor","reboot","watch")][string]$Action="list",[string]$HostId,[string]$ConfigPath="$env:ProgramData\MeowDeploy\RecoveryRelay\relay.json")
 $ErrorActionPreference="Stop"; Set-StrictMode -Version Latest
-function Load-Config { if(!(Test-Path -LiteralPath $ConfigPath)){throw "Missing config: $ConfigPath"}; $c=Get-Content -LiteralPath $ConfigPath -Raw|ConvertFrom-Json; if(!$c.hosts){throw "Config hosts array is required"}; return $c }
+function Load-Config {
+    if(!(Test-Path -LiteralPath $ConfigPath)){throw "Missing config: $ConfigPath"}
+    try { $c=Get-Content -LiteralPath $ConfigPath -Raw|ConvertFrom-Json -ErrorAction Stop } catch { throw "Invalid relay JSON: $($_.Exception.Message)" }
+    if(!$c.hosts -or @($c.hosts).Count -eq 0){throw "Config hosts array is required and cannot be empty"}
+    if(!$c.logPath){$c.logPath="$env:ProgramData\MeowDeploy\RecoveryRelay\recovery.jsonl"}
+    if(!$c.pollSeconds -or [int]$c.pollSeconds -lt 10 -or [int]$c.pollSeconds -gt 3600){throw "pollSeconds must be between 10 and 3600"}
+    $ids=@{}
+    foreach($host in $c.hosts){
+        if([string]::IsNullOrWhiteSpace([string]$host.id)){throw "Every host requires a non-empty id"}
+        if($ids.ContainsKey([string]$host.id)){throw "Duplicate host id: $($host.id)"}
+        $ids[[string]$host.id]=$true
+        if([string]$host.address -notmatch "^[0-9a-fA-F:.]+$"){throw "Host $($host.id): address must be an IP literal"}
+        $parsed=[Net.IPAddress]::None
+        if(![Net.IPAddress]::TryParse([string]$host.address,[ref]$parsed)){throw "Host $($host.id): invalid IP address"}
+        if($host.enabled -and ([string]::IsNullOrWhiteSpace([string]$host.sshUser) -or [string]$host.sshUser -notmatch "^[A-Za-z0-9_.-]+$")){throw "Host $($host.id): enabled hosts require a safe SSH username"}
+        if($host.enabled -and ([int]$host.sshPort -lt 1 -or [int]$host.sshPort -gt 65535)){throw "Host $($host.id): SSH port must be 1-65535"}
+        if($host.mac){$mac=([string]$host.mac -replace "[:-]","");if($mac -notmatch "^[0-9A-Fa-f]{12}$"){throw "Host $($host.id): invalid MAC address"}}
+    }
+    return $c
+}
 function Audit($c,$id,$op,$result){$p=[Environment]::ExpandEnvironmentVariables([string]$c.logPath);$d=Split-Path -Parent $p;if(!(Test-Path $d)){New-Item -ItemType Directory -Path $d -Force|Out-Null};[ordered]@{utc=(Get-Date).ToUniversalTime().ToString("o");host=$id;operation=$op;result=$result;actor=[Environment]::UserName}|ConvertTo-Json -Compress|Add-Content -LiteralPath $p -Encoding UTF8}
 function Get-Target($c,$id){$h=@($c.hosts|Where-Object{$_.id -eq $id -and $_.enabled})|Select-Object -First 1;if(!$h){throw "Enabled host not found: $id"};if($h.address -notmatch "^[0-9a-fA-F:.]+$"){throw "Address must be an IP literal"};return $h}
 function Wake($mac){$m=$mac -replace "[^0-9A-Fa-f]","";if($m.Length -ne 12){throw "Invalid MAC: $mac"};$b=for($i=0;$i -lt 6;$i++){[Convert]::ToByte($m.Substring($i*2,2),16)};$packet=[byte[]](@(255,255,255,255,255,255)+($b*16));$u=[Net.Sockets.UdpClient]::new();try{$u.EnableBroadcast=$true;$u.Send($packet,$packet.Length,[Net.IPEndPoint]::new([Net.IPAddress]::Broadcast,9))|Out-Null}finally{$u.Dispose()}}
@@ -10,7 +29,23 @@ function Reachable($h){return Test-Connection -ComputerName $h.address -Count 1 
 function Ssh($h,$cmd){$exe=(Get-Command ssh.exe -ErrorAction Stop).Source;$target="$($h.sshUser)@$($h.address)";$args=@("-p",[string]$h.sshPort,"-o","BatchMode=yes","-o","ConnectTimeout=8","-o","StrictHostKeyChecking=yes",$target,$cmd);$p=Start-Process -FilePath $exe -ArgumentList $args -NoNewWindow -Wait -PassThru;if($p.ExitCode -ne 0){throw "SSH failed (exit $($p.ExitCode)); verify known_hosts, keys and sudo permissions"}}
 $cfg=Load-Config
 if($Action -eq "list"){foreach($h in $cfg.hosts){$up=$false;if($h.enabled){$up=Reachable $h};[pscustomobject]@{Id=$h.id;Name=$h.name;IP=$h.address;Enabled=$h.enabled;Reachable=$up;Role=$h.role}};exit}
-if($Action -eq "watch"){Write-Warning "Probe/WOL only. No automatic reboot or service restart. ICMP failure is not proof of power-off.";while($true){foreach($h in $cfg.hosts|Where-Object enabled){if(!(Reachable $h) -and $cfg.autoWake -eq $true -and $h.mac){Wake ([string]$h.mac);Audit $cfg $h.id "wake-auto" "packet sent; boot unverified";Write-Host "WOL sent: $($h.id)"}};Start-Sleep -Seconds ([Math]::Max(10,[int]$cfg.pollSeconds))}}
+if($Action -eq "watch"){
+    Write-Warning "Probe/WOL only. No automatic reboot or service restart. ICMP failure is not proof of power-off."
+    $lastWake=@{}
+    while($true){
+        foreach($h in $cfg.hosts|Where-Object enabled){
+            if(!(Reachable $h) -and $cfg.autoWake -eq $true -and $h.mac){
+                $last=$lastWake[[string]$h.id]
+                if(!$last -or ((Get-Date)-$last).TotalSeconds -ge 300){
+                    Wake ([string]$h.mac);$lastWake[[string]$h.id]=Get-Date
+                    Audit $cfg $h.id "wake-auto" "packet sent; boot unverified; 300-second cooldown"
+                    Write-Host "WOL sent: $($h.id); next automatic attempt no sooner than 5 minutes."
+                }
+            }
+        }
+        Start-Sleep -Seconds ([Math]::Max(10,[int]$cfg.pollSeconds))
+    }
+}
 $h=Get-Target $cfg $HostId
 try { switch($Action){
 "probe" {$ok=Reachable $h;Audit $cfg $HostId "probe" $(if($ok){"reachable"}else{"no ICMP response"});[pscustomobject]@{Host=$HostId;Reachable=$ok;Note="ICMP failure does not prove power-off"}}
