@@ -204,7 +204,6 @@ public sealed class DashboardV2 : Form
         pageTitle.Font = new Font("Segoe UI", 23F, FontStyle.Bold);
         pageTitle.TextAlign = ContentAlignment.MiddleLeft;
         header.Controls.Add(pageTitle, 0, 0);
-        pageTitle.SetColumnSpan(1, 1);
 
         pageSubtitle.Dock = DockStyle.Fill;
         pageSubtitle.Text = "Your infrastructure, at a glance.";
