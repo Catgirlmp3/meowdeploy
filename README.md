@@ -223,6 +223,9 @@ Limitations still worth knowing:
 
 ## Windows recovery relay
 
+See [the recovery rollout scenario test](docs/RECOVERY_ROLLOUT_SCENARIOS.md) and run the offline-only policy simulator with `python recovery/simulate_recovery.py`. These validate decision-policy examples only; they do not test Windows services, SSH, WOL, AMT, or physical workers.
+
+
 An interactive Windows-side LAN recovery MVP is available in [`recovery/`](recovery/MeowDeploy-RecoveryRelay.ps1). It supports WOL, reachability checks, Proxmox browser launch, and fixed SSH service/reboot operations. Read [the setup and safety guide](docs/WINDOWS_RECOVERY_RELAY.md) before enabling hosts. It is not yet a Windows service or integrated dashboard component; unattended reboot/power-cycle is intentionally not enabled.
 
 ## Tests
