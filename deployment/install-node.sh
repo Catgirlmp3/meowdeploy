@@ -200,7 +200,7 @@ install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
 
 # Preserve existing Tor configuration and ensure the exact SOCKS port MeowDeploy uses.
 touch /etc/tor/torrc
-if ! grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\\.0\\.0\\.1:9050([[:space:]]|$)' /etc/tor/torrc; then
+if ! grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\.0\.0\.1:9050([[:space:]]|$)' /etc/tor/torrc; then
   printf '\n# MeowDeploy local outbound proxy\nSocksPort 127.0.0.1:9050\n' >> /etc/tor/torrc
 fi
 TOR_UNIT=tor.service
@@ -288,7 +288,7 @@ done
   asset="https://github.com/xmrig/xmrig/releases/download/v${VER}/xmrig-${VER}-linux-static-x64.tar.gz"
   api="https://api.github.com/repos/xmrig/xmrig/releases/tags/v${VER}"
   ok=0
-  for attempt in 1 2 3; do
+  for _attempt in 1 2 3; do
     rm -f "$tmp/release.json" "$tmp/xmrig.tar.gz"
     if curl -fsSL --retry 2 --connect-timeout 15 "$api" -o "$tmp/release.json" && \
        digest=$(jq -r --arg n "xmrig-${VER}-linux-static-x64.tar.gz" '.assets[]|select(.name==$n)|.digest|sub("^sha256:";"")' "$tmp/release.json") && \
