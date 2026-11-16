@@ -211,41 +211,37 @@ install -d -m 750 "$BASE" "$CONF" "$STATE"
 # The agent writes this drop-in while ProtectSystem=full keeps /etc read-only.
 install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
 
-# Preserve existing Tor configuration and ensure the exact SOCKS port MeowDeploy uses.
-touch /etc/tor/torrc
-if ! grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\.0\.0\.1:9050([[:space:]]|$)' /etc/tor/torrc; then
-  printf '\n# MeowDeploy local outbound proxy\nSocksPort 127.0.0.1:9050\n' >> /etc/tor/torrc
-fi
-# Debian/Proxmox ships Tor as a master unit plus a default instance.
-# The instance unit is static and must not be enabled directly; enable the
-# master unit for boot, then start/restart the actual daemon instance.
-TOR_BOOT_UNIT=tor.service
-TOR_UNIT=tor.service
-if systemctl cat tor@default.service >/dev/null 2>&1; then
-  TOR_UNIT=tor@default.service
-fi
-if systemctl cat "$TOR_BOOT_UNIT" >/dev/null 2>&1; then
-  systemctl enable "$TOR_BOOT_UNIT" >/dev/null || {
-    echo "Failed to enable Tor boot unit $TOR_BOOT_UNIT." >&2
-    exit 1
-  }
-else
-  # Older/non-Debian layouts expose only tor.service.
-  TOR_BOOT_UNIT=$TOR_UNIT
-  systemctl enable "$TOR_BOOT_UNIT" >/dev/null || {
-    echo "Failed to enable Tor service $TOR_BOOT_UNIT." >&2
-    exit 1
-  }
-fi
-systemctl restart "$TOR_UNIT" || { echo "Failed to restart Tor daemon $TOR_UNIT." >&2; exit 1; }
-
 tor_listening() {
-  ss -ltn 2>/dev/null | grep -Eq '127\.0\.0\.1:9050([[:space:]]|$)'
+  ss -ltn 2>/dev/null | grep -Eq '127\\.0\\.0\\.1:9050([[:space:]]|$)'
 }
-for _ in $(seq 1 60); do
-  tor_listening && break
-  sleep 1
-done
+
+# Reuse an existing Tor SOCKS listener without changing or restarting Tor.
+# Avoid systemctl enable tor.service: on Proxmox its SysV compatibility
+# helper can hang even when Tor is already operational.
+if tor_listening; then
+  if systemctl is-active --quiet tor@default.service; then
+    TOR_UNIT=tor@default.service
+  elif systemctl is-active --quiet tor.service; then
+    TOR_UNIT=tor.service
+  else
+    TOR_UNIT=tor.service
+  fi
+  echo "Reusing existing Tor SOCKS listener on 127.0.0.1:9050."
+else
+  touch /etc/tor/torrc
+  if ! grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\\.0\\.0\\.1:9050([[:space:]]|$)' /etc/tor/torrc; then
+    printf '\\n# MeowDeploy local outbound proxy\\nSocksPort 127.0.0.1:9050\\n' >> /etc/tor/torrc
+  fi
+  TOR_UNIT=tor.service
+  if systemctl cat tor@default.service >/dev/null 2>&1; then
+    TOR_UNIT=tor@default.service
+  fi
+  systemctl restart "$TOR_UNIT" || { echo "Failed to start Tor daemon $TOR_UNIT." >&2; exit 1; }
+  for _ in $(seq 1 60); do
+    tor_listening && break
+    sleep 1
+  done
+fi
 if ! tor_listening; then
   echo 'Tor SOCKS listener 127.0.0.1:9050 is not listening. Check /etc/tor/torrc and journalctl -u tor.' >&2
   systemctl status tor --no-pager -l >&2 || true
