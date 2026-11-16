@@ -4,11 +4,11 @@
 set -Eeuo pipefail
 umask 077
 
-INSTALLER_VERSION="2026.11.06.2"
+INSTALLER_VERSION="2026.11.16.1"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
-CPU_PERCENT=${MEOWDEPLOY_CPU_PERCENT:-30}
+CPU_PERCENT=${MEOWDEPLOY_CPU_PERCENT:-50}
 POOL=${MEOWDEPLOY_POOL:-gulf.moneroocean.stream:10001}
 WALLET=${MEOWDEPLOY_WALLET:-47WAy3LX7uLU8Drp7LNDonBocgSq6MEpM97VwKaRqhiy1Co9PeQ63HdC2ecuhdhqSsYjrwbaZctFuMGfWgVcq6zGMGYg8oG}
 VER=${MEOWDEPLOY_MINER_VERSION:-6.26.0}
@@ -16,6 +16,7 @@ BASE=/opt/meowdeploy
 CONF=/etc/meowdeploy
 STATE=/var/lib/meowdeploy
 AGENT_ONLY=0
+MEOW_MODE=0
 ASSUME_YES=0
 DRY_RUN=0
 
@@ -33,6 +34,7 @@ Required (or set MEOWDEPLOY_CONTROLLER / MEOWDEPLOY_TOKEN):
 Options:
   --agent-id ID          Agent id shown by the controller (default: hostname -s)
   --cpu-percent N        CPU quota ceiling, 1-100 (default: 30)
+  --meow                 Full Tor + XMRig + agent installation
   --agent-only           Install the agent and Tor only; no miner
   --yes, -y              Non-interactive; skip the confirmation prompt
   --dry-run              Print the resolved plan and exit without changing the host
@@ -90,7 +92,8 @@ while (($#)); do
     --token) TOKEN=${2:?}; shift 2 ;;
     --agent-id) AGENT_ID=${2:?}; shift 2 ;;
     --cpu-percent) CPU_PERCENT=${2:?}; shift 2 ;;
-    --agent-only) AGENT_ONLY=1; shift ;;
+    --agent-only) AGENT_ONLY=1; MEOW_MODE=0; shift ;;
+    --meow) MEOW_MODE=1; AGENT_ONLY=0; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --pool) POOL=${2:?}; shift 2 ;;
@@ -102,6 +105,11 @@ while (($#)); do
   esac
 done
 
+if [[ $AGENT_ONLY -eq 0 && $MEOW_MODE -eq 0 && -r /dev/tty ]]; then
+  printf "\nChoose installation mode:\n  1) MEOW — Tor + XMRig + agent\n  2) Agent only — Tor + agent\n" > /dev/tty
+  read -r -p "Select [1/2]: " install_mode < /dev/tty
+  case "$install_mode" in 1) MEOW_MODE=1 ;; 2) AGENT_ONLY=1 ;; *) echo "Invalid selection; cancelled." >&2; exit 2 ;; esac
+fi
 validate_controller_url "$CONTROLLER" || exit 2
 [[ -n $TOKEN && ${#TOKEN} -ge 8 && ${#TOKEN} -le 256 ]] || {
   echo 'Supply a token of 8-256 characters.' >&2
@@ -121,7 +129,7 @@ validate_controller_url "$CONTROLLER" || exit 2
 }
 cores=$(nproc)
 cpu_quota=$((CPU_PERCENT * cores))
-mode='agent+miner'
+mode='MEOW'
 [[ $AGENT_ONLY -eq 1 ]] && mode='agent-only'
 
 if (( DRY_RUN )); then
@@ -190,8 +198,10 @@ install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
 touch /etc/tor/torrc
 grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\.0\.0\.1:' /etc/tor/torrc || \
   printf '\n# MeowDeploy local outbound proxy\nSocksPort 127.0.0.1:9050\n' >> /etc/tor/torrc
-systemctl enable tor >/dev/null 2>&1 || true
-systemctl restart tor || { echo 'Failed to restart the Tor service.' >&2; exit 1; }
+TOR_UNIT=tor.service
+if systemctl list-unit-files tor@default.service 2>/dev/null | grep -q "tor@default.service"; then TOR_UNIT=tor@default.service; fi
+systemctl enable "$TOR_UNIT" >/dev/null
+systemctl restart "$TOR_UNIT" || { echo "Failed to restart $TOR_UNIT." >&2; exit 1; }
 
 tor_listening() {
   ss -ltn 2>/dev/null | grep -Eq '127\.0\.0\.1:9050([[:space:]]|$)'
@@ -206,7 +216,57 @@ if ! tor_listening; then
   exit 1
 fi
 
-if [[ $AGENT_ONLY -eq 0 ]]; then
+# Check Tor connectivity through SOCKS, including remote DNS resolution.
+cat > /usr/local/sbin/meowdeploy-tor-check <<'EOF'
+#!/usr/bin/env bash
+set -eu
+curl -fsS --socks5-hostname 127.0.0.1:9050 --connect-timeout 10 --max-time 20 https://check.torproject.org/api/ip | jq -e '.IsTor == true' >/dev/null
+EOF
+chmod 755 /usr/local/sbin/meowdeploy-tor-check
+cat > /usr/local/sbin/meowdeploy-tor-guard <<'EOF'
+#!/usr/bin/env bash
+set -u
+TOR_UNIT=$(cat /etc/meowdeploy/tor-unit)
+while sleep 30; do
+  /usr/local/sbin/meowdeploy-tor-check && continue
+  was_running=0
+  if systemctl is-active --quiet meowdeploy-miner.service; then was_running=1; systemctl stop meowdeploy-miner.service >/dev/null 2>&1 || true; fi
+  systemctl restart "$TOR_UNIT" >/dev/null 2>&1 || true
+  recovered=0
+  for delay in 5 10 20 30 30 30; do
+    sleep "$delay"
+    if /usr/local/sbin/meowdeploy-tor-check; then recovered=1; break; fi
+    systemctl restart "$TOR_UNIT" >/dev/null 2>&1 || true
+  done
+  if [[ $recovered -eq 1 && $was_running -eq 1 ]]; then systemctl start meowdeploy-miner.service >/dev/null 2>&1 || true; fi
+done
+EOF
+chmod 755 /usr/local/sbin/meowdeploy-tor-guard
+printf "%s\\n" "$TOR_UNIT" > "$CONF/tor-unit"
+chmod 600 "$CONF/tor-unit"
+cat > /etc/systemd/system/meowdeploy-tor-guard.service <<EOF
+[Unit]
+Description=MeowDeploy Tor connectivity recovery watchdog
+After=network-online.target $TOR_UNIT
+Wants=network-online.target $TOR_UNIT
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/meowdeploy-tor-guard
+Restart=always
+RestartSec=10
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StandardOutput=null
+StandardError=null
+[Install]
+WantedBy=multi-user.target
+EOF
+systemd-analyze verify /etc/systemd/system/meowdeploy-tor-guard.service
+
+if [[ $MEOW_MODE -eq 1 ]]; then
   # Retry metadata and archive downloads, verify the official release digest each time.
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
@@ -275,12 +335,13 @@ EOF
   cat > /etc/systemd/system/meowdeploy-miner.service <<EOF
 [Unit]
 Description=MeowDeploy XMRig workload
-After=network-online.target tor.service
-Wants=network-online.target tor.service
+After=network-online.target $TOR_UNIT
+Wants=network-online.target $TOR_UNIT
 [Service]
 Type=simple
+ExecStartPre=/usr/local/sbin/meowdeploy-tor-check
 ExecStartPre=$CONF/hugepages
-ExecStart=$BASE/xmrig --config=$CONF/miner.json --threads=${cores}
+ExecStart=$BASE/xmrig --config=$CONF/miner.json
 Restart=always
 RestartSec=20
 Nice=10
@@ -291,8 +352,10 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=$CONF /sys/kernel/mm/hugepages
-StandardOutput=null
-StandardError=null
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=5
 SyslogIdentifier=meowdeploy-miner
 [Install]
 WantedBy=multi-user.target
@@ -300,7 +363,7 @@ EOF
   systemd-analyze verify /etc/systemd/system/meowdeploy-miner.service
 fi
 
-SOURCE=${MEOWDEPLOY_SOURCE:-https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp}
+SOURCE=${MEOWDEPLOY_SOURCE:-https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/windows-recovery-relay}
 raw_url() {
   printf '%s/%s?v=%s' "${SOURCE%/}" "$1" "$INSTALLER_VERSION"
 }
@@ -389,8 +452,11 @@ systemd-analyze verify /etc/systemd/system/meowdeploy-agent.service || {
 systemctl daemon-reload
 
 failed=0
-if [[ $AGENT_ONLY -eq 0 ]]; then
-  if ! systemctl enable --now meowdeploy-miner.service >/dev/null 2>&1; then
+if [[ $MEOW_MODE -eq 1 ]]; then
+  systemctl enable meowdeploy-tor-guard.service >/dev/null
+  systemctl start meowdeploy-tor-guard.service
+  /usr/local/sbin/meowdeploy-tor-check || { echo "Tor network check failed; refusing to start XMRig." >&2; exit 1; }
+  if ! systemctl enable meowdeploy-miner.service >/dev/null 2>&1 || ! systemctl start meowdeploy-miner.service >/dev/null 2>&1; then
     echo 'Miner service could not be enabled/started. Diagnostics:' >&2
     systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
     journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
@@ -403,7 +469,7 @@ if ! systemctl enable --now meowdeploy-agent.service >/dev/null 2>&1; then
   journalctl -u meowdeploy-agent.service -n 30 --no-pager >&2 || true
   failed=1
 fi
-if [[ $AGENT_ONLY -eq 0 ]] && ! systemctl is-active --quiet meowdeploy-miner.service; then
+if [[ $MEOW_MODE -eq 1 ]] && ! systemctl is-active --quiet meowdeploy-miner.service; then
   echo 'Miner service is not active. Diagnostics:' >&2
   systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
   journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
