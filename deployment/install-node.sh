@@ -173,7 +173,6 @@ MeowDeploy host setup
   Host:        $(hostname -f 2>/dev/null || hostname)
   Mode:        $mode
   CPU cap:     ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%)
-  Mode:        $mode
 EOF
   if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
     cat <<EOF
@@ -277,7 +276,7 @@ WantedBy=multi-user.target
 EOF
 systemd-analyze verify /etc/systemd/system/meowdeploy-tor-guard.service
 
-if [[ $MEOW_MODE -eq 1 ]]; then
+if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
   # Preserve existing MeowDeploy miner state before replacing it.
 backup_dir="$STATE/backups/$(date -u +%Y%m%dT%H%M%SZ)"
 install -d -m 700 "$backup_dir"
@@ -385,6 +384,7 @@ EOF
   systemd-analyze verify /etc/systemd/system/meowdeploy-miner.service
 fi
 
+if [[ $MEOW_EASY -eq 0 ]]; then
 SOURCE=${MEOWDEPLOY_SOURCE:-https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/windows-recovery-relay}
 raw_url() {
   printf '%s/%s?v=%s' "${SOURCE%/}" "$1" "$INSTALLER_VERSION"
@@ -481,10 +481,11 @@ systemd-analyze verify /etc/systemd/system/meowdeploy-agent.service || {
   echo 'Agent systemd unit failed validation.' >&2
   exit 1
 }
+fi # MEOW EASY skips all controller and agent installation
 systemctl daemon-reload
 
 failed=0
-if [[ $MEOW_MODE -eq 1 ]]; then
+if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
   systemctl enable meowdeploy-tor-guard.service >/dev/null
   systemctl start meowdeploy-tor-guard.service
   tor_ready=0
@@ -501,46 +502,47 @@ if [[ $MEOW_MODE -eq 1 ]]; then
     journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
     failed=1
   fi
-fi
-if ! systemctl enable --now meowdeploy-agent.service >/dev/null 2>&1; then
-  echo 'Agent service could not be enabled/started. Diagnostics:' >&2
-  systemctl status meowdeploy-agent.service --no-pager -l >&2 || true
-  journalctl -u meowdeploy-agent.service -n 30 --no-pager >&2 || true
-  failed=1
-fi
-if [[ $MEOW_MODE -eq 1 ]] && ! systemctl is-active --quiet meowdeploy-miner.service; then
-  echo 'Miner service is not active. Diagnostics:' >&2
-  systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
-  journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
-  failed=1
-fi
-if ! systemctl is-active --quiet meowdeploy-agent.service; then
-  echo 'Agent service is not active. Diagnostics:' >&2
-  systemctl status meowdeploy-agent.service --no-pager -l >&2 || true
-  journalctl -u meowdeploy-agent.service -n 30 --no-pager >&2 || true
-  failed=1
-fi
-if ! systemctl is-enabled --quiet meowdeploy-agent.service; then
-  echo 'Agent service is not enabled for startup.' >&2
-  failed=1
+  if ! systemctl is-active --quiet meowdeploy-miner.service; then
+    echo 'Miner service is not active. Diagnostics:' >&2
+    systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
+    journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
+    failed=1
+  fi
 fi
 
-expected_exec="$BASE/venv/bin/python3 $BASE/meowdeploy_agent.py --config $CONF/agent.json"
-effective_exec=$(systemctl show meowdeploy-agent.service -p ExecStart --value 2>/dev/null || true)
-if [[ $effective_exec != *"$expected_exec"* ]]; then
-  echo 'Agent service is not using the expected config-file ExecStart.' >&2
-  echo "Expected to find: $expected_exec" >&2
-  echo "Effective ExecStart: ${effective_exec:-<empty>}" >&2
-  echo 'Check /etc/systemd/system/meowdeploy-agent.service and its drop-ins.' >&2
-  failed=1
-fi
-if [[ -d /etc/systemd/system/meowdeploy-agent.service.d ]] && \
-   grep -rEq '^[[:space:]]*ExecStart[[:space:]]*=' /etc/systemd/system/meowdeploy-agent.service.d --include='*.conf'; then
-  echo 'An agent drop-in still overrides ExecStart.' >&2
-  failed=1
+if [[ $MEOW_EASY -eq 0 ]]; then
+  if ! systemctl enable --now meowdeploy-agent.service >/dev/null 2>&1; then
+    echo 'Agent service could not be enabled/started. Diagnostics:' >&2
+    systemctl status meowdeploy-agent.service --no-pager -l >&2 || true
+    journalctl -u meowdeploy-agent.service -n 30 --no-pager >&2 || true
+    failed=1
+  fi
+  if ! systemctl is-active --quiet meowdeploy-agent.service; then
+    echo 'Agent service is not active. Diagnostics:' >&2
+    systemctl status meowdeploy-agent.service --no-pager -l >&2 || true
+    journalctl -u meowdeploy-agent.service -n 30 --no-pager >&2 || true
+    failed=1
+  fi
+  if ! systemctl is-enabled --quiet meowdeploy-agent.service; then
+    echo 'Agent service is not enabled for startup.' >&2
+    failed=1
+  fi
+  expected_exec="$BASE/venv/bin/python3 $BASE/meowdeploy_agent.py --config $CONF/agent.json"
+  effective_exec=$(systemctl show meowdeploy-agent.service -p ExecStart --value 2>/dev/null || true)
+  if [[ $effective_exec != *"$expected_exec"* ]]; then
+    echo 'Agent service is not using the expected config-file ExecStart.' >&2
+    echo "Expected to find: $expected_exec" >&2
+    echo "Effective ExecStart: ${effective_exec:-<empty>}" >&2
+    echo 'Check /etc/systemd/system/meowdeploy-agent.service and its drop-ins.' >&2
+    failed=1
+  fi
+  if [[ -d /etc/systemd/system/meowdeploy-agent.service.d ]] && \
+     grep -rEq '^[[:space:]]*ExecStart[[:space:]]*=' /etc/systemd/system/meowdeploy-agent.service.d --include='*.conf'; then
+    echo 'An agent drop-in still overrides ExecStart.' >&2
+    failed=1
+  fi
 fi
 ((failed == 0)) || exit 1
-
 if ! tor_listening; then
   echo 'Tor SOCKS listener 127.0.0.1:9050 disappeared during installation.' >&2
   exit 1
