@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-INSTALLER_VERSION="2026.11.16.4"
+INSTALLER_VERSION="2026.11.16.5"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
@@ -17,6 +17,7 @@ CONF=/etc/meowdeploy
 STATE=/var/lib/meowdeploy
 AGENT_ONLY=0
 MEOW_MODE=0
+MEOW_EASY=0
 ASSUME_YES=0
 DRY_RUN=0
 
@@ -35,6 +36,7 @@ Options:
   --agent-id ID          Agent id shown by the controller (default: hostname -s)
   --cpu-percent N        CPU quota ceiling, 1-100 (default: 50)
   --meow                 Full Tor + XMRig + agent installation
+  --meow-easy            Tor + XMRig mining only; no controller/dashboard
   --agent-only           Install the agent and Tor only; no miner
   --yes, -y              Non-interactive; skip the confirmation prompt
   --dry-run              Print the resolved plan and exit without changing the host
@@ -92,8 +94,9 @@ while (($#)); do
     --token) TOKEN=${2:?}; shift 2 ;;
     --agent-id) AGENT_ID=${2:?}; shift 2 ;;
     --cpu-percent) CPU_PERCENT=${2:?}; shift 2 ;;
-    --agent-only) AGENT_ONLY=1; MEOW_MODE=0; shift ;;
-    --meow) MEOW_MODE=1; AGENT_ONLY=0; shift ;;
+    --agent-only) AGENT_ONLY=1; MEOW_MODE=0; MEOW_EASY=0; shift ;;
+    --meow) MEOW_MODE=1; AGENT_ONLY=0; MEOW_EASY=0; shift ;;
+    --meow-easy) MEOW_EASY=1; MEOW_MODE=0; AGENT_ONLY=0; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --pool) POOL=${2:?}; shift 2 ;;
@@ -105,24 +108,28 @@ while (($#)); do
   esac
 done
 
-if [[ $AGENT_ONLY -eq 0 && $MEOW_MODE -eq 0 && -r /dev/tty ]]; then
-  printf "\nChoose installation mode:\n  1) MEOW — Tor + XMRig + agent\n  2) Agent only — Tor + agent\n" > /dev/tty
-  read -r -p "Select [1/2]: " install_mode < /dev/tty
-  case "$install_mode" in 1) MEOW_MODE=1 ;; 2) AGENT_ONLY=1 ;; *) echo "Invalid selection; cancelled." >&2; exit 2 ;; esac
+if [[ $AGENT_ONLY -eq 0 && $MEOW_MODE -eq 0 && $MEOW_EASY -eq 0 && -r /dev/tty ]]; then
+  printf "\nChoose installation mode:\n  1) MEOW — Tor + XMRig + agent\n  2) MEOW EASY — Tor + XMRig only\n  3) Agent only — Tor + agent\n" > /dev/tty
+  read -r -p "Select [1/2/3]: " install_mode < /dev/tty
+  case "$install_mode" in 1) MEOW_MODE=1 ;; 2) MEOW_EASY=1 ;; 3) AGENT_ONLY=1 ;; *) echo "Invalid selection; cancelled." >&2; exit 2 ;; esac
 fi
-if [[ $AGENT_ONLY -eq 0 && $MEOW_MODE -eq 0 ]]; then
-  echo "Select --meow or --agent-only when running non-interactively." >&2
+if [[ $AGENT_ONLY -eq 0 && $MEOW_MODE -eq 0 && $MEOW_EASY -eq 0 ]]; then
+  echo "Select --meow, --meow-easy or --agent-only when running non-interactively." >&2
   exit 2
 fi
-validate_controller_url "$CONTROLLER" || exit 2
-[[ -n $TOKEN && ${#TOKEN} -ge 32 && ${#TOKEN} -le 256 ]] || {
-  echo 'Supply the controller token (32-256 characters).' >&2
-  exit 2
-}
+if [[ $MEOW_EASY -eq 0 ]]; then
+  validate_controller_url "$CONTROLLER" || exit 2
+  [[ -n $TOKEN && ${#TOKEN} -ge 32 && ${#TOKEN} -le 256 ]] || {
+    echo 'Supply the controller token (32-256 characters).' >&2
+    exit 2
+  }
+fi
+if [[ $MEOW_EASY -eq 0 ]]; then
 [[ $AGENT_ID =~ ^[A-Za-z0-9_.:-]{1,128}$ ]] || {
   echo 'Agent id must be 1-128 characters from A-Z, a-z, 0-9, _, ., :, -.' >&2
   exit 2
 }
+fi
 [[ $CPU_PERCENT =~ ^([1-9][0-9]?|100)$ ]] || {
   echo 'CPU percentage must be 1-100.' >&2
   exit 2
@@ -134,6 +141,7 @@ validate_controller_url "$CONTROLLER" || exit 2
 cores=$(nproc)
 cpu_quota=$((CPU_PERCENT * cores))
 mode='MEOW'
+[[ $MEOW_EASY -eq 1 ]] && mode='MEOW EASY'
 [[ $AGENT_ONLY -eq 1 ]] && mode='agent-only'
 
 if (( DRY_RUN )); then
@@ -144,7 +152,7 @@ MeowDeploy dry run (no changes will be made)
   Mode:        $mode
   CPU cap:     ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%)
 EOF
-  if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then -eq 0 ]]; then
+  if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
     cat <<EOF
   Pool:        $POOL
   Wallet:      $WALLET
