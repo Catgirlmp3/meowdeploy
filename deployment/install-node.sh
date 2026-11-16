@@ -505,17 +505,28 @@ if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
     sleep "$delay"
   done
   [[ $tor_ready -eq 1 ]] || { echo "Tor recovery failed; refusing to start XMRig." >&2; journalctl -u "$TOR_UNIT" -n 30 --no-pager >&2 || true; exit 1; }
+  miner_started_at=$(date --iso-8601=seconds)
   if ! systemctl enable meowdeploy-miner.service >/dev/null 2>&1 || ! systemctl start meowdeploy-miner.service >/dev/null 2>&1; then
     echo 'Miner service could not be enabled/started. Diagnostics:' >&2
     systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
     journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
     failed=1
-  fi
-  if ! systemctl is-active --quiet meowdeploy-miner.service; then
-    echo 'Miner service is not active. Diagnostics:' >&2
-    systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
-    journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
-    failed=1
+  else
+    pool_ready=0
+    for _attempt in $(seq 1 45); do
+      if journalctl -u meowdeploy-miner.service --since "$miner_started_at" -o cat --no-pager 2>/dev/null | grep -Fq 'new job from'; then
+        pool_ready=1
+        break
+      fi
+      systemctl is-active --quiet meowdeploy-miner.service || break
+      sleep 2
+    done
+    if [[ $pool_ready -ne 1 ]]; then
+      echo 'XMRig did not receive a mining job from MoneroOcean within 90 seconds. Diagnostics:' >&2
+      systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
+      journalctl -u meowdeploy-miner.service --since "$miner_started_at" -n 60 --no-pager >&2 || true
+      failed=1
+    fi
   fi
 fi
 
