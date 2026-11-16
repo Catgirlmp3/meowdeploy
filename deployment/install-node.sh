@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-INSTALLER_VERSION="2026.11.16.2"
+INSTALLER_VERSION="2026.11.16.3"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
@@ -29,7 +29,7 @@ Usage:
 
 Required (or set MEOWDEPLOY_CONTROLLER / MEOWDEPLOY_TOKEN):
   --controller URL       Controller onion URL, including port
-  --token TOKEN          Shared HMAC token (8+ characters)
+  --token TOKEN          Shared HMAC token (minimum 32 characters)
 
 Options:
   --agent-id ID          Agent id shown by the controller (default: hostname -s)
@@ -115,8 +115,8 @@ if [[ $AGENT_ONLY -eq 0 && $MEOW_MODE -eq 0 ]]; then
   exit 2
 fi
 validate_controller_url "$CONTROLLER" || exit 2
-[[ -n $TOKEN && ${#TOKEN} -ge 8 && ${#TOKEN} -le 256 ]] || {
-  echo 'Supply a token of 8-256 characters.' >&2
+[[ -n $TOKEN && ${#TOKEN} -ge 32 && ${#TOKEN} -le 256 ]] || {
+  echo 'Supply the controller token (32-256 characters).' >&2
   exit 2
 }
 [[ $AGENT_ID =~ ^[A-Za-z0-9_.:-]{1,128}$ ]] || {
@@ -313,16 +313,18 @@ done
   gb_pages=false
   [[ -d /sys/kernel/mm/hugepages/hugepages-1048576kB ]] && gb_pages=true
 
-  cat > "$CONF/miner.json.tmp" <<EOF
-{
- "autosave": false, "background": false, "colors": false,
- "randomx": {"init": -1, "mode": "auto", "1gb-pages": ${gb_pages}, "rdmsr": true, "wrmsr": true, "numa": true},
- "cpu": {"enabled": true, "huge-pages": true, "huge-pages-jit": true, "priority": 1, "yield": true, "asm": true},
- "http": {"enabled": true, "host": "127.0.0.1", "port": 18088, "access-token": null, "restricted": true},
- "opencl": {"enabled": false}, "cuda": {"enabled": false},
- "pools": [{"url":"${POOL}","user":"${WALLET}","pass":"${rig}","rig-id":"${rig}","keepalive":true,"tls":false,"socks5":"127.0.0.1:9050"}]
-}
-EOF
+  jq -n \
+    --arg pool "$POOL" \
+    --arg wallet "$WALLET" \
+    --arg rig "$rig" \
+    --argjson gb_pages "$gb_pages" \
+    '{autosave:false,background:false,colors:false,
+      randomx:{init:-1,mode:"auto", "1gb-pages":$gb_pages,rdmsr:true,wrmsr:true,numa:true},
+      cpu:{enabled:true,"huge-pages":true,"huge-pages-jit":true,priority:1,yield:true,asm:true},
+      http:{enabled:true,host:"127.0.0.1",port:18088,"access-token":null,restricted:true},
+      opencl:{enabled:false},cuda:{enabled:false},
+      pools:[{url:$pool,user:$wallet,pass:$rig,"rig-id":$rig,keepalive:true,tls:false,socks5:"127.0.0.1:9050"}]}' \
+    > "$CONF/miner.json.tmp"
   jq -e '.pools[0].url and .pools[0].user and .http.enabled and .http.host=="127.0.0.1"' "$CONF/miner.json.tmp" >/dev/null
   chmod 600 "$CONF/miner.json.tmp"
   mv "$CONF/miner.json.tmp" "$CONF/miner.json"
