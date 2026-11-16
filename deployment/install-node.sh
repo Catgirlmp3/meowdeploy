@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-INSTALLER_VERSION="2026.11.16.1"
+INSTALLER_VERSION="2026.11.16.2"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
@@ -33,7 +33,7 @@ Required (or set MEOWDEPLOY_CONTROLLER / MEOWDEPLOY_TOKEN):
 
 Options:
   --agent-id ID          Agent id shown by the controller (default: hostname -s)
-  --cpu-percent N        CPU quota ceiling, 1-100 (default: 30)
+  --cpu-percent N        CPU quota ceiling, 1-100 (default: 50)
   --meow                 Full Tor + XMRig + agent installation
   --agent-only           Install the agent and Tor only; no miner
   --yes, -y              Non-interactive; skip the confirmation prompt
@@ -109,6 +109,10 @@ if [[ $AGENT_ONLY -eq 0 && $MEOW_MODE -eq 0 && -r /dev/tty ]]; then
   printf "\nChoose installation mode:\n  1) MEOW — Tor + XMRig + agent\n  2) Agent only — Tor + agent\n" > /dev/tty
   read -r -p "Select [1/2]: " install_mode < /dev/tty
   case "$install_mode" in 1) MEOW_MODE=1 ;; 2) AGENT_ONLY=1 ;; *) echo "Invalid selection; cancelled." >&2; exit 2 ;; esac
+fi
+if [[ $AGENT_ONLY -eq 0 && $MEOW_MODE -eq 0 ]]; then
+  echo "Select --meow or --agent-only when running non-interactively." >&2
+  exit 2
 fi
 validate_controller_url "$CONTROLLER" || exit 2
 [[ -n $TOKEN && ${#TOKEN} -ge 8 && ${#TOKEN} -le 256 ]] || {
@@ -242,7 +246,7 @@ while sleep 30; do
 done
 EOF
 chmod 755 /usr/local/sbin/meowdeploy-tor-guard
-printf "%s\\n" "$TOR_UNIT" > "$CONF/tor-unit"
+printf "%s\n" "$TOR_UNIT" > "$CONF/tor-unit"
 chmod 600 "$CONF/tor-unit"
 cat > /etc/systemd/system/meowdeploy-tor-guard.service <<EOF
 [Unit]
@@ -259,8 +263,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-StandardOutput=null
-StandardError=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=meowdeploy-tor-guard
 [Install]
 WantedBy=multi-user.target
 EOF
