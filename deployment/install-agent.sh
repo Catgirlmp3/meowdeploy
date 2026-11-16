@@ -3,8 +3,8 @@
 # to run a stale copy that does not understand the documented options.
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="2026.11.06.2"
-SOURCE=${MEOWDEPLOY_SOURCE:-https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp}
+BOOTSTRAP_VERSION="2026.11.16.1"
+SOURCE=${MEOWDEPLOY_SOURCE:-https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/windows-recovery-relay}
 
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   echo "MeowDeploy bootstrap $BOOTSTRAP_VERSION"
