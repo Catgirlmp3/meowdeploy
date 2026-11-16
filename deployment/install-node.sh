@@ -548,4 +548,8 @@ if ! tor_listening; then
   exit 1
 fi
 
-echo "MeowDeploy installed: ${mode} active; installer ${INSTALLER_VERSION}; agent id ${AGENT_ID}; CPU cap ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%); config, ExecStart, Tor, and services verified."
+if [[ $MEOW_EASY -eq 1 ]]; then
+  echo "MEOW EASY installed: Tor + XMRig active; installer ${INSTALLER_VERSION}; worker ${rig}; CPU cap ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%); Tor and miner verified."
+else
+  echo "MeowDeploy installed: ${mode} active; installer ${INSTALLER_VERSION}; agent id ${AGENT_ID}; CPU cap ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%); config, ExecStart, Tor, and services verified."
+fi
