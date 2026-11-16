@@ -212,7 +212,7 @@ install -d -m 750 "$BASE" "$CONF" "$STATE"
 install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
 
 tor_listening() {
-  ss -ltn 2>/dev/null | grep -Eq '127\\.0\\.0\\.1:9050([[:space:]]|$)'
+  ss -ltn 2>/dev/null | grep -Eq '127\.0\.0\.1:9050([[:space:]]|$)'
 }
 
 # Reuse an existing Tor SOCKS listener without changing or restarting Tor.
@@ -229,8 +229,8 @@ if tor_listening; then
   echo "Reusing existing Tor SOCKS listener on 127.0.0.1:9050."
 else
   touch /etc/tor/torrc
-  if ! grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\\.0\\.0\\.1:9050([[:space:]]|$)' /etc/tor/torrc; then
-    printf '\\n# MeowDeploy local outbound proxy\\nSocksPort 127.0.0.1:9050\\n' >> /etc/tor/torrc
+  if ! grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\.0\.0\.1:9050([[:space:]]|$)' /etc/tor/torrc; then
+    printf '\n# MeowDeploy local outbound proxy\nSocksPort 127.0.0.1:9050\n' >> /etc/tor/torrc
   fi
   TOR_UNIT=tor.service
   if systemctl cat tor@default.service >/dev/null 2>&1; then
