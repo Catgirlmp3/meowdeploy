@@ -273,7 +273,16 @@ EOF
 systemd-analyze verify /etc/systemd/system/meowdeploy-tor-guard.service
 
 if [[ $MEOW_MODE -eq 1 ]]; then
-  # Retry metadata and archive downloads, verify the official release digest each time.
+  # Preserve existing MeowDeploy miner state before replacing it.
+backup_dir="$STATE/backups/$(date -u +%Y%m%dT%H%M%SZ)"
+install -d -m 700 "$backup_dir"
+if systemctl is-active --quiet meowdeploy-miner.service 2>/dev/null; then
+  systemctl stop meowdeploy-miner.service
+fi
+for existing in "$BASE/xmrig" "$CONF/miner.json" /etc/systemd/system/meowdeploy-miner.service; do
+  if [[ -e $existing ]]; then cp -a --parents "$existing" "$backup_dir/"; fi
+done
+# Retry metadata and archive downloads, verify the official release digest each time.
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   asset="https://github.com/xmrig/xmrig/releases/download/v${VER}/xmrig-${VER}-linux-static-x64.tar.gz"
@@ -450,6 +459,16 @@ remove_agent_execstart_dropins() {
   rmdir "$dir" 2>/dev/null || true
 }
 remove_agent_execstart_dropins
+
+# Keep the agent's Tor dependency aligned with the unit selected above.
+install -d -m 755 /etc/systemd/system/meowdeploy-agent.service.d
+cat > /etc/systemd/system/meowdeploy-agent.service.d/00-tor-unit.conf <<EOF
+[Unit]
+After=
+After=network-online.target $TOR_UNIT
+Wants=
+Wants=network-online.target $TOR_UNIT
+EOF
 
 systemd-analyze verify /etc/systemd/system/meowdeploy-agent.service || {
   echo 'Agent systemd unit failed validation.' >&2
