@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-INSTALLER_VERSION="2026.11.16.3"
+INSTALLER_VERSION="2026.11.16.4"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
@@ -141,12 +141,10 @@ if (( DRY_RUN )); then
 MeowDeploy dry run (no changes will be made)
   Installer:   $INSTALLER_VERSION
   Host:        $(hostname -f 2>/dev/null || hostname)
-  Agent ID:    $AGENT_ID
-  Controller:  $CONTROLLER
-  CPU cap:     ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%)
   Mode:        $mode
+  CPU cap:     ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%)
 EOF
-  if [[ $AGENT_ONLY -eq 0 ]]; then
+  if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then -eq 0 ]]; then
     cat <<EOF
   Pool:        $POOL
   Wallet:      $WALLET
@@ -165,12 +163,11 @@ if (( ! ASSUME_YES )); then
 MeowDeploy host setup
   Installer:   $INSTALLER_VERSION
   Host:        $(hostname -f 2>/dev/null || hostname)
-  Agent ID:    $AGENT_ID
-  Controller:  $CONTROLLER
+  Mode:        $mode
   CPU cap:     ${CPU_PERCENT}% of ${cores} cores (CPUQuota=${cpu_quota}%)
   Mode:        $mode
 EOF
-  if [[ $AGENT_ONLY -eq 0 ]]; then
+  if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
     cat <<EOF
   Pool:        $POOL
   Wallet:      $WALLET
