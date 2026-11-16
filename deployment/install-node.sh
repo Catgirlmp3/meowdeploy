@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-INSTALLER_VERSION="2026.11.16.5"
+INSTALLER_VERSION="2026.11.16.6"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
@@ -28,7 +28,7 @@ MeowDeploy node installer
 Usage:
   install-node.sh --controller http://HOST.onion:18765 --token TOKEN [options]
 
-Required (or set MEOWDEPLOY_CONTROLLER / MEOWDEPLOY_TOKEN):
+Required for MEOW and Agent-only (or set MEOWDEPLOY_CONTROLLER / MEOWDEPLOY_TOKEN):
   --controller URL       Controller onion URL, including port
   --token TOKEN          Shared HMAC token (minimum 32 characters)
 
@@ -41,7 +41,7 @@ Options:
   --yes, -y              Non-interactive; skip the confirmation prompt
   --dry-run              Print the resolved plan and exit without changing the host
   --pool HOST:PORT       Miner pool (default: MoneroOcean)
-  --wallet ADDRESS       Miner wallet (default: the project test wallet)
+  --wallet ADDRESS       Miner wallet (default: configured wallet)
   --miner-version VER    XMRig release (default: 6.26.0)
   --version, -V          Print the installer version and exit
   --help, -h             Show this help
@@ -49,6 +49,9 @@ Options:
 Examples:
   # Full install, interactive confirmation
   install-node.sh --controller http://abc.onion:18765 --token 'long-secret'
+
+  # MEOW EASY, no controller or dashboard
+  install-node.sh --meow-easy --yes
 
   # Agent-only, unattended
   install-node.sh --controller http://abc.onion:18765 --token 'long-secret' \
@@ -194,10 +197,16 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
-apt-get install -y -qq tor python3 python3-venv curl ca-certificates tar gzip jq iproute2 >/dev/null
-for command_name in curl jq ss systemctl systemd-analyze python3; do
+packages=(tor curl ca-certificates tar gzip jq iproute2)
+if [[ $MEOW_EASY -eq 0 ]]; then packages+=(python3 python3-venv); fi
+apt-get install -y -qq "${packages[@]}" >/dev/null
+for command_name in curl jq ss systemctl systemd-analyze; do
   command -v "$command_name" >/dev/null || { echo "Required command is missing: $command_name" >&2; exit 1; }
 done
+if [[ $MEOW_EASY -eq 0 ]] && ! command -v python3 >/dev/null; then
+  echo "Required command is missing: python3" >&2
+  exit 1
+fi
 install -d -m 750 "$BASE" "$CONF" "$STATE"
 # The agent writes this drop-in while ProtectSystem=full keeps /etc read-only.
 install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
