@@ -534,14 +534,14 @@ if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
   systemctl enable meowdeploy-tor-guard.service >/dev/null
   systemctl start meowdeploy-tor-guard.service
   tor_ready=0
-  for attempt in 1 2 3; do
+  for attempt in 1 2 3 4 5 6; do
     if /usr/local/sbin/meowdeploy-tor-check; then tor_ready=1; break; fi
-    if (( attempt < 3 )); then
-      echo "Tor is still bootstrapping (check $attempt/3); waiting 30 seconds before retry." >&2
+    if (( attempt < 6 )); then
+      echo "Tor is still bootstrapping (check $attempt/6); waiting 30 seconds before retry." >&2
       sleep 30
     fi
   done
-  [[ $tor_ready -eq 1 ]] || { echo "Tor is not reachable after 3 checks; refusing to start XMRig. The Tor guard will continue recovery attempts every minute." >&2; journalctl -u "$TOR_UNIT" -n 30 --no-pager >&2 || true; exit 1; }
+  [[ $tor_ready -eq 1 ]] || { echo "Tor is not reachable after 6 checks; refusing to start XMRig. The Tor guard will continue recovery attempts every minute." >&2; journalctl -u "$TOR_UNIT" -n 30 --no-pager >&2 || true; exit 1; }
   miner_started_at=$(date --iso-8601=seconds)
   if ! systemctl enable meowdeploy-miner.service >/dev/null 2>&1 || ! systemctl start meowdeploy-miner.service >/dev/null 2>&1; then
     echo 'Miner service could not be enabled/started. Diagnostics:' >&2
