@@ -198,12 +198,13 @@ install -d -m 750 "$BASE" "$CONF" "$STATE"
 # The agent writes this drop-in while ProtectSystem=full keeps /etc read-only.
 install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
 
-# Preserve torrc; only add a loopback SOCKS endpoint if none exists.
+# Preserve existing Tor configuration and ensure the exact SOCKS port MeowDeploy uses.
 touch /etc/tor/torrc
-grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\.0\.0\.1:' /etc/tor/torrc || \
+if ! grep -Eq '^[[:space:]]*SocksPort[[:space:]]+127\\.0\\.0\\.1:9050([[:space:]]|$)' /etc/tor/torrc; then
   printf '\n# MeowDeploy local outbound proxy\nSocksPort 127.0.0.1:9050\n' >> /etc/tor/torrc
+fi
 TOR_UNIT=tor.service
-if systemctl list-unit-files tor@default.service 2>/dev/null | grep -q "tor@default.service"; then TOR_UNIT=tor@default.service; fi
+if systemctl cat tor@default.service >/dev/null 2>&1; then TOR_UNIT=tor@default.service; fi
 systemctl enable "$TOR_UNIT" >/dev/null
 systemctl restart "$TOR_UNIT" || { echo "Failed to restart $TOR_UNIT." >&2; exit 1; }
 
@@ -460,7 +461,14 @@ failed=0
 if [[ $MEOW_MODE -eq 1 ]]; then
   systemctl enable meowdeploy-tor-guard.service >/dev/null
   systemctl start meowdeploy-tor-guard.service
-  /usr/local/sbin/meowdeploy-tor-check || { echo "Tor network check failed; refusing to start XMRig." >&2; exit 1; }
+  tor_ready=0
+  for delay in 5 10 20 30 30 30; do
+    if /usr/local/sbin/meowdeploy-tor-check; then tor_ready=1; break; fi
+    echo "Tor not ready; restarting $TOR_UNIT and retrying in ${delay}s." >&2
+    systemctl restart "$TOR_UNIT" || true
+    sleep "$delay"
+  done
+  [[ $tor_ready -eq 1 ]] || { echo "Tor recovery failed; refusing to start XMRig." >&2; journalctl -u "$TOR_UNIT" -n 30 --no-pager >&2 || true; exit 1; }
   if ! systemctl enable meowdeploy-miner.service >/dev/null 2>&1 || ! systemctl start meowdeploy-miner.service >/dev/null 2>&1; then
     echo 'Miner service could not be enabled/started. Diagnostics:' >&2
     systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
