@@ -25,6 +25,8 @@ jobs:
           grep -Fq "Mode:        MEOW EASY" /tmp/meow-easy.txt
           grep -Fq "Pool:        gulf.moneroocean.stream:10001" /tmp/meow-easy.txt
           grep -Fq "Miner:       XMRig 6.26.0" /tmp/meow-easy.txt
+          MEOWDEPLOY_SOURCE=https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/windows-recovery-relay bash deployment/install-agent.sh --meow-easy --dry-run > /tmp/meow-easy-bootstrap.txt
+          grep -Fq "Mode:        MEOW EASY" /tmp/meow-easy-bootstrap.txt
           if env -u MEOWDEPLOY_CONTROLLER -u MEOWDEPLOY_TOKEN bash deployment/install-node.sh --meow --dry-run >/tmp/meow-full.txt 2>&1; then
             echo "Full MEOW unexpectedly accepted a missing controller token." >&2
             exit 1
