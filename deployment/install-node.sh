@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-INSTALLER_VERSION="2026.11.16.7"
+INSTALLER_VERSION="2026.11.16.8"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
@@ -259,18 +259,40 @@ cat > /usr/local/sbin/meowdeploy-tor-guard <<'EOF'
 #!/usr/bin/env bash
 set -u
 TOR_UNIT=$(cat /etc/meowdeploy/tor-unit)
-while sleep 30; do
-  /usr/local/sbin/meowdeploy-tor-check && continue
-  was_running=0
-  if systemctl is-active --quiet meowdeploy-miner.service; then was_running=1; systemctl stop meowdeploy-miner.service >/dev/null 2>&1 || true; fi
-  systemctl restart "$TOR_UNIT" >/dev/null 2>&1 || true
-  recovered=0
-  for delay in 5 10 20 30 30 30; do
-    sleep "$delay"
-    if /usr/local/sbin/meowdeploy-tor-check; then recovered=1; break; fi
-    systemctl restart "$TOR_UNIT" >/dev/null 2>&1 || true
+
+while true; do
+  # Require three consecutive failed checks (30 seconds apart) before
+  # restarting Tor. A single slow circuit/bootstrap is not a failure.
+  failures=0
+  while (( failures < 3 )); do
+    sleep 30
+    if /usr/local/sbin/meowdeploy-tor-check; then
+      failures=0
+    else
+      ((failures += 1))
+    fi
   done
-  if [[ $recovered -eq 1 && $was_running -eq 1 ]]; then systemctl start meowdeploy-miner.service >/dev/null 2>&1 || true; fi
+
+  # Keep the miner stopped while Tor is unavailable.
+  was_running=0
+  if systemctl is-active --quiet meowdeploy-miner.service; then
+    was_running=1
+    systemctl stop meowdeploy-miner.service >/dev/null 2>&1 || true
+  fi
+
+  # After the first restart, give Tor a full minute to bootstrap.
+  # If it is still offline, retry at one-minute intervals.
+  while true; do
+    systemctl restart "$TOR_UNIT" >/dev/null 2>&1 || true
+    sleep 60
+    if /usr/local/sbin/meowdeploy-tor-check; then
+      break
+    fi
+  done
+
+  if [[ $was_running -eq 1 ]]; then
+    systemctl start meowdeploy-miner.service >/dev/null 2>&1 || true
+  fi
 done
 EOF
 chmod 755 /usr/local/sbin/meowdeploy-tor-guard
@@ -285,7 +307,7 @@ Wants=network-online.target $TOR_UNIT
 Type=simple
 ExecStart=/usr/local/sbin/meowdeploy-tor-guard
 Restart=always
-RestartSec=10
+RestartSec=30
 Nice=10
 NoNewPrivileges=true
 PrivateTmp=true
@@ -512,13 +534,14 @@ if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
   systemctl enable meowdeploy-tor-guard.service >/dev/null
   systemctl start meowdeploy-tor-guard.service
   tor_ready=0
-  for delay in 5 10 20 30 30 30; do
+  for attempt in 1 2 3; do
     if /usr/local/sbin/meowdeploy-tor-check; then tor_ready=1; break; fi
-    echo "Tor not ready; restarting $TOR_UNIT and retrying in ${delay}s." >&2
-    systemctl restart "$TOR_UNIT" || true
-    sleep "$delay"
+    if (( attempt < 3 )); then
+      echo "Tor is still bootstrapping (check $attempt/3); waiting 30 seconds before retry." >&2
+      sleep 30
+    fi
   done
-  [[ $tor_ready -eq 1 ]] || { echo "Tor recovery failed; refusing to start XMRig." >&2; journalctl -u "$TOR_UNIT" -n 30 --no-pager >&2 || true; exit 1; }
+  [[ $tor_ready -eq 1 ]] || { echo "Tor is not reachable after 3 checks; refusing to start XMRig. The Tor guard will continue recovery attempts every minute." >&2; journalctl -u "$TOR_UNIT" -n 30 --no-pager >&2 || true; exit 1; }
   miner_started_at=$(date --iso-8601=seconds)
   if ! systemctl enable meowdeploy-miner.service >/dev/null 2>&1 || ! systemctl start meowdeploy-miner.service >/dev/null 2>&1; then
     echo 'Miner service could not be enabled/started. Diagnostics:' >&2
