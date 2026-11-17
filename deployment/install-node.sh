@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 umask 077
 
-INSTALLER_VERSION="2026.11.16.8"
+INSTALLER_VERSION="2026.11.16.9"
 CONTROLLER=${MEOWDEPLOY_CONTROLLER:-}
 TOKEN=${MEOWDEPLOY_TOKEN:-}
 AGENT_ID=${MEOWDEPLOY_AGENT_ID:-$(hostname -s 2>/dev/null || hostname)}
@@ -208,8 +208,25 @@ if [[ $MEOW_EASY -eq 0 ]] && ! command -v python3 >/dev/null; then
   exit 1
 fi
 install -d -m 750 "$BASE" "$CONF" "$STATE"
+
+# Migrate installations created by earlier versions to the shorter unit name.
+if [[ -e /etc/systemd/system/meowdeploy-miner.service ]]; then
+  if [[ -e /etc/systemd/system/deploy.service ]]; then
+    echo "Both old and new miner unit files exist; refusing an ambiguous migration." >&2
+    exit 1
+  fi
+  systemctl disable --now meowdeploy-miner.service >/dev/null 2>&1 || true
+  mv /etc/systemd/system/meowdeploy-miner.service /etc/systemd/system/deploy.service
+fi
+if [[ -d /etc/systemd/system/meowdeploy-miner.service.d ]]; then
+  if [[ -e /etc/systemd/system/deploy.service.d ]]; then
+    echo "Both old and new miner drop-in directories exist; refusing an ambiguous migration." >&2
+    exit 1
+  fi
+  mv /etc/systemd/system/meowdeploy-miner.service.d /etc/systemd/system/deploy.service.d
+fi
 # The agent writes this drop-in while ProtectSystem=full keeps /etc read-only.
-install -d -m 755 /etc/systemd/system/meowdeploy-miner.service.d
+install -d -m 755 /etc/systemd/system/deploy.service.d
 
 tor_listening() {
   ss -ltn 2>/dev/null | grep -Eq '127\.0\.0\.1:9050([[:space:]]|$)'
@@ -275,9 +292,9 @@ while true; do
 
   # Keep the miner stopped while Tor is unavailable.
   was_running=0
-  if systemctl is-active --quiet meowdeploy-miner.service; then
+  if systemctl is-active --quiet deploy.service; then
     was_running=1
-    systemctl stop meowdeploy-miner.service >/dev/null 2>&1 || true
+    systemctl stop deploy.service >/dev/null 2>&1 || true
   fi
 
   # After the first restart, give Tor a full minute to bootstrap.
@@ -291,7 +308,7 @@ while true; do
   done
 
   if [[ $was_running -eq 1 ]]; then
-    systemctl start meowdeploy-miner.service >/dev/null 2>&1 || true
+    systemctl start deploy.service >/dev/null 2>&1 || true
   fi
 done
 EOF
@@ -325,10 +342,10 @@ if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
   # Preserve existing MeowDeploy miner state before replacing it.
 backup_dir="$STATE/backups/$(date -u +%Y%m%dT%H%M%SZ)"
 install -d -m 700 "$backup_dir"
-if systemctl is-active --quiet meowdeploy-miner.service 2>/dev/null; then
-  systemctl stop meowdeploy-miner.service
+if systemctl is-active --quiet deploy.service 2>/dev/null; then
+  systemctl stop deploy.service
 fi
-for existing in "$BASE/xmrig" "$CONF/miner.json" /etc/systemd/system/meowdeploy-miner.service; do
+for existing in "$BASE/xmrig" "$CONF/miner.json" /etc/systemd/system/deploy.service; do
   if [[ -e $existing ]]; then cp -a --parents "$existing" "$backup_dir/"; fi
 done
 # Retry metadata and archive downloads, verify the official release digest each time.
@@ -398,7 +415,7 @@ EOF
     echo 1 > /sys/module/msr/parameters/allow_writes 2>/dev/null || true
   fi
 
-  cat > /etc/systemd/system/meowdeploy-miner.service <<EOF
+  cat > /etc/systemd/system/deploy.service <<EOF
 [Unit]
 Description=MeowDeploy XMRig workload
 After=network-online.target $TOR_UNIT
@@ -426,7 +443,7 @@ SyslogIdentifier=meowdeploy-miner
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemd-analyze verify /etc/systemd/system/meowdeploy-miner.service
+  systemd-analyze verify /etc/systemd/system/deploy.service
 fi
 
 if [[ $MEOW_EASY -eq 0 ]]; then
@@ -472,7 +489,7 @@ jq -n \
   --arg agent_id "$AGENT_ID" \
   --arg token "$TOKEN" \
   --arg state_path "$STATE/state.json" \
-  --arg miner_service meowdeploy-miner.service \
+  --arg miner_service deploy.service \
   --argjson socks_port 9050 \
   --argjson poll_seconds 30 \
   '{controller:$controller,agent_id:$agent_id,token:$token,state_path:$state_path,miner_service:$miner_service,socks_port:$socks_port,poll_seconds:$poll_seconds}' \
@@ -543,25 +560,25 @@ if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
   done
   [[ $tor_ready -eq 1 ]] || { echo "Tor is not reachable after 6 checks; refusing to start XMRig. The Tor guard will continue recovery attempts every minute." >&2; journalctl -u "$TOR_UNIT" -n 30 --no-pager >&2 || true; exit 1; }
   miner_started_at=$(date --iso-8601=seconds)
-  if ! systemctl enable meowdeploy-miner.service >/dev/null 2>&1 || ! systemctl start meowdeploy-miner.service >/dev/null 2>&1; then
+  if ! systemctl enable deploy.service >/dev/null 2>&1 || ! systemctl start deploy.service >/dev/null 2>&1; then
     echo 'Miner service could not be enabled/started. Diagnostics:' >&2
-    systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
-    journalctl -u meowdeploy-miner.service -n 30 --no-pager >&2 || true
+    systemctl status deploy.service --no-pager -l >&2 || true
+    journalctl -u deploy.service -n 30 --no-pager >&2 || true
     failed=1
   else
     pool_ready=0
     for _attempt in $(seq 1 45); do
-      if journalctl -u meowdeploy-miner.service --since "$miner_started_at" -o cat --no-pager 2>/dev/null | grep -Fq 'new job from'; then
+      if journalctl -u deploy.service --since "$miner_started_at" -o cat --no-pager 2>/dev/null | grep -Fq 'new job from'; then
         pool_ready=1
         break
       fi
-      systemctl is-active --quiet meowdeploy-miner.service || break
+      systemctl is-active --quiet deploy.service || break
       sleep 2
     done
     if [[ $pool_ready -ne 1 ]]; then
       echo 'XMRig did not receive a mining job from MoneroOcean within 90 seconds. Diagnostics:' >&2
-      systemctl status meowdeploy-miner.service --no-pager -l >&2 || true
-      journalctl -u meowdeploy-miner.service --since "$miner_started_at" -n 60 --no-pager >&2 || true
+      systemctl status deploy.service --no-pager -l >&2 || true
+      journalctl -u deploy.service --since "$miner_started_at" -n 60 --no-pager >&2 || true
       failed=1
     fi
   fi
