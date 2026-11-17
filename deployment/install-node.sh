@@ -549,7 +549,7 @@ systemctl daemon-reload
 failed=0
 if [[ $MEOW_MODE -eq 1 || $MEOW_EASY -eq 1 ]]; then
   systemctl enable meowdeploy-tor-guard.service >/dev/null
-  systemctl start meowdeploy-tor-guard.service
+  systemctl restart meowdeploy-tor-guard.service
   tor_ready=0
   for attempt in 1 2 3 4 5 6; do
     if /usr/local/sbin/meowdeploy-tor-check; then tor_ready=1; break; fi
