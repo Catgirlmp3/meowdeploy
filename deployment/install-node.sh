@@ -439,7 +439,7 @@ StandardOutput=journal
 StandardError=journal
 LogRateLimitIntervalSec=30s
 LogRateLimitBurst=5
-SyslogIdentifier=meowdeploy-miner
+SyslogIdentifier=deploy
 [Install]
 WantedBy=multi-user.target
 EOF
