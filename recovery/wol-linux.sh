@@ -27,7 +27,7 @@ Description=MeowDeploy send Wake-on-LAN to worker fleet
 Type=oneshot
 Environment=MEOWDEPLOY_WOL_CONFIG=$CONFIG
 Environment=MEOWDEPLOY_WOL_INTERFACE=${MEOWDEPLOY_WOL_INTERFACE:-vmbr0}
-ExecStart=$0 wake-all
+ExecStart=/bin/bash $0 wake-all
 UNIT
     cat >/etc/systemd/system/meowdeploy-wol.timer <<'UNIT'
 [Unit]
