@@ -1,0 +1,42 @@
+name: Installer checks
+
+on:
+  push:
+    branches:
+      - feature/windows-recovery-relay
+    paths:
+      - "deployment/*.sh"
+      - ".github/workflows/installer-checks.yml"
+  workflow_dispatch:
+
+jobs:
+  shell-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: |
+          bash -n deployment/install-node.sh
+          bash -n deployment/install-agent.sh
+      - name: Installer mode smoke tests
+        run: |
+          set -euo pipefail
+          env -u MEOWDEPLOY_CONTROLLER -u MEOWDEPLOY_TOKEN bash deployment/install-node.sh --meow-easy --dry-run > /tmp/meow-easy.txt
+          grep -Fq "Mode:        MEOW EASY" /tmp/meow-easy.txt
+          grep -Fq "Pool:        gulf.moneroocean.stream:10001" /tmp/meow-easy.txt
+          grep -Fq "Miner:       XMRig 6.26.0" /tmp/meow-easy.txt
+          MEOWDEPLOY_SOURCE=https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/windows-recovery-relay bash deployment/install-agent.sh --meow-easy --dry-run > /tmp/meow-easy-bootstrap.txt
+          grep -Fq "Mode:        MEOW EASY" /tmp/meow-easy-bootstrap.txt
+          if env -u MEOWDEPLOY_CONTROLLER -u MEOWDEPLOY_TOKEN bash deployment/install-node.sh --meow --dry-run >/tmp/meow-full.txt 2>&1; then
+            echo "Full MEOW unexpectedly accepted a missing controller token." >&2
+            exit 1
+          fi
+          MEOWDEPLOY_CONTROLLER=http://abc.onion:18765 MEOWDEPLOY_TOKEN=0123456789abcdef0123456789abcdef bash deployment/install-node.sh --meow --dry-run > /tmp/meow-full.txt
+          grep -Fq "Mode:        MEOW" /tmp/meow-full.txt
+          MEOWDEPLOY_CONTROLLER=http://abc.onion:18765 MEOWDEPLOY_TOKEN=0123456789abcdef0123456789abcdef bash deployment/install-node.sh --agent-only --dry-run > /tmp/agent-only.txt
+          grep -Fq "Mode:        agent-only" /tmp/agent-only.txt
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: deployment
+          severity: warning

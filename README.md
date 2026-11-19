@@ -221,6 +221,109 @@ Limitations still worth knowing:
   VM before production use.
 - `deploy.py` intentionally does not install the miner; use `install-node.sh` for that.
 
+## Windows recovery relay
+
+See [the recovery rollout scenario test](docs/RECOVERY_ROLLOUT_SCENARIOS.md) and run the offline-only policy simulator with `python recovery/simulate_recovery.py`. These validate decision-policy examples only; they do not test Windows services, SSH, WOL, AMT, or physical workers.
+
+
+An interactive Windows-side LAN recovery MVP is available in [`recovery/`](recovery/MeowDeploy-RecoveryRelay.ps1). It supports WOL, reachability checks, Proxmox browser launch, and fixed SSH service/reboot operations. Read [the setup and safety guide](docs/WINDOWS_RECOVERY_RELAY.md) before enabling hosts. It is not yet a Windows service or integrated dashboard component; unattended reboot/power-cycle is intentionally not enabled.
+
+
+## Overnight power schedule (19:00–04:00 Europe/Dublin)
+
+The overnight power schedule is deliberately opt-in and separate from the agent's
+CPU-percentage schedule. It uses two independent always-on WOL senders (Windows
+Recovery Relay and the physical Proxmox host) and a local systemd shutdown timer on
+each worker. Sending a magic packet is not proof that a host booted.
+
+### Configure each worker (Debian/Proxmox worker OS)
+
+After enabling WOL in firmware/NIC and testing a real shutdown-to-WOL boot, install
+the local 04:00 shutdown timer on each worker:
+
+```bash
+sudo bash deployment/install-overnight-shutdown.sh --time 04:00 --timezone Europe/Dublin
+systemctl list-timers meowdeploy-overnight-shutdown.timer
+```
+
+This is opt-in. It does not change the miner or Tor units. The worker boots normally;
+the existing Tor service and `ExecStartPre=/usr/local/sbin/meowdeploy-tor-check`
+gate remain responsible for ensuring Tor is usable before `deploy.service` starts.
+The shutdown timer is local, so it still fires if the controller or Tor is offline.
+
+To disable it on a worker:
+
+```bash
+sudo bash deployment/install-overnight-shutdown.sh --disable
+```
+
+### Windows WOL controller
+
+Use the existing Recovery Relay inventory at
+`%ProgramData%\\MeowDeploy\\RecoveryRelay\\relay.json`. Add a verified MAC
+address to each worker and set `enabled: true`. Keep Proxmox infrastructure hosts
+out of the worker list unless you intentionally want to wake them too.
+
+```powershell
+.\\recovery\\MeowDeploy-Overnight.ps1 -Action test
+.\\recovery\\MeowDeploy-Overnight.ps1 -Action wake-all
+.\\recovery\\MeowDeploy-Overnight.ps1 -Action install-task
+```
+
+The scheduled task runs daily at 19:00 as SYSTEM, including when no user is logged
+on. Set the Windows machine's time zone to **GMT Standard Time (Europe/Dublin)**.
+To remove the task:
+
+```powershell
+.\\recovery\\MeowDeploy-Overnight.ps1 -Action remove-task
+```
+
+### Proxmox WOL controller (independent second sender)
+
+On the always-on physical Proxmox host, install etherwake and create a MAC inventory:
+
+```bash
+apt-get update && apt-get install -y etherwake
+install -d -m 700 /etc/meowdeploy
+nano /etc/meowdeploy/wol-hosts
+```
+
+Put one worker MAC address per line (colon-separated), for example:
+
+```text
+aa:bb:cc:dd:ee:ff
+11:22:33:44:55:66
+```
+
+Then send a test packet and install the daily timer:
+
+```bash
+bash recovery/wol-linux.sh wake-all
+bash recovery/wol-linux.sh install-timer
+systemctl list-timers meowdeploy-wol.timer
+```
+
+By default it sends on `vmbr0`; override with
+`MEOWDEPLOY_WOL_INTERFACE=eno1 bash recovery/wol-linux.sh wake-all` if your
+worker LAN is reached through another interface. The Windows and Proxmox senders
+both transmit at 19:00; duplicate magic packets are harmless.
+
+Remove the Proxmox timer with `bash recovery/wol-linux.sh remove-timer`.
+
+### Important rollout order
+
+1. Verify MAC addresses and enable WOL in BIOS/UEFI and NIC settings on every worker.
+2. Test one worker from a full shutdown before enrolling the rest.
+3. Install the local 04:00 shutdown timer on that worker and verify its next trigger.
+4. Only then enable that worker in the Windows and Proxmox WOL inventories.
+5. Repeat one worker at a time. ICMP/ping failure is not proof of power-off.
+
+The Proxmox and Windows senders must remain powered on and on the same LAN/broadcast
+domain as the workers. This does not wake a powered-off Windows or Proxmox controller.
+The Proxmox host should not be placed in the worker shutdown inventory. The local
+shutdown helper is intended for worker OS instances only; do not install it on the
+Proxmox host that must send the 19:00 packets.
+
 ## Tests
 
 ```powershell
@@ -234,3 +337,17 @@ deduplication, the stop-miner regression where a stop used to be followed by an
 unconditional restart, old/null agent state migration, controller URL and port
 validation, installer argument parsing, stale `ExecStart` drop-in cleanup, and
 service/config consistency.
+
+
+### Wake-on-LAN setup
+
+On a physical Linux/Proxmox host, run the interactive WOL helper:
+
+```bash
+sudo bash deployment/configure-wol.sh
+```
+
+It prompts before changing NIC WOL and, only if Dell Command | Configure is
+already present, separately prompts before changing the Dell BIOS WOL setting.
+See [the WOL and recovery guide](docs/WINDOWS_RECOVERY_RELAY.md) for limitations
+and the physical shutdown test. This helper does not remotely configure the fleet.

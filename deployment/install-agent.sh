@@ -3,8 +3,8 @@
 # to run a stale copy that does not understand the documented options.
 set -Eeuo pipefail
 
-BOOTSTRAP_VERSION="2026.11.06.2"
-SOURCE=${MEOWDEPLOY_SOURCE:-https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/fleet-controller-mvp}
+BOOTSTRAP_VERSION="2026.11.17.1"
+SOURCE=${MEOWDEPLOY_SOURCE:-https://raw.githubusercontent.com/Catgirlmp3/meowdeploy/feature/windows-recovery-relay}
 
 if [[ ${1:-} == --version || ${1:-} == -V ]]; then
   echo "MeowDeploy bootstrap $BOOTSTRAP_VERSION"
@@ -21,8 +21,8 @@ curl -fsSL --retry 3 --connect-timeout 15 -H 'Cache-Control: no-cache' \
   "$SOURCE/deployment/install-node.sh?v=$BOOTSTRAP_VERSION" -o "$tmp"
 [[ -s $tmp ]] || { echo 'Downloaded installer is empty.' >&2; exit 1; }
 
-if ! grep -Fq -- '--agent-only' "$tmp" || ! grep -Fq -- '--yes|-y)' "$tmp"; then
-  echo 'Downloaded installer is older than this bootstrap (missing --agent-only/--yes support).' >&2
+if ! grep -Fq -- '--agent-only' "$tmp" || ! grep -Fq -- '--meow-easy' "$tmp" || ! grep -Fq -- '--yes|-y)' "$tmp"; then
+  echo 'Downloaded installer is older than this bootstrap (missing --agent-only/--meow-easy/--yes support).' >&2
   echo "Refusing to run it. Check that $SOURCE contains the current branch and retry." >&2
   exit 2
 fi
