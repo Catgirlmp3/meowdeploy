@@ -29,9 +29,9 @@ if($Action -eq "install-task"){
   $args="-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Action wake-all -ConfigPath `"$ConfigPath`""
   $action=New-ScheduledTaskAction -Execute "powershell.exe" -Argument $args
   $trigger=New-ScheduledTaskTrigger -Daily -At "7:00PM"
-  $principal=New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Highest
+  $principal=New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
   Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Description "Send Wake-on-LAN packets to enabled MeowDeploy workers daily at 19:00." -Force|Out-Null
-  Write-Host "Installed daily 19:00 task for the current Windows account. This account must be logged on."
+  Write-Host "Installed daily 19:00 task running as SYSTEM; it runs even when nobody is logged on. Ensure Windows is set to the Europe/Dublin time zone."
   exit
 }
 $hosts=Read-Hosts
